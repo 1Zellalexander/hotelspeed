@@ -394,7 +394,7 @@
   <ul class="nav-links">
     <li><a href="#map-section">Map</a></li>
     <li><a href="#results-section">Rankings</a></li>
-    <li><a href="#submit" class="btn-nav">Test My Speed</a></li>
+    <li><a href="#submit" class="btn-nav" onclick="setTimeout(function(){document.getElementById('runTestBtn').click();},400);">Test My Speed</a></li>
   </ul>
 </nav>
 
@@ -403,7 +403,7 @@
   <h1>Know before<br>you book.</h1>
   <p>Real internet speed test results from hotels worldwide. Submitted by travelers, for travelers.</p>
   <div class="hero-actions">
-    <a href="#submit" class="btn btn-primary">
+    <a href="#submit" class="btn btn-primary" onclick="setTimeout(function(){document.getElementById('runTestBtn').click();},400);">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
       Test My Speed
     </a>
@@ -780,27 +780,39 @@ document.getElementById('distSortBtn').addEventListener('click', async function(
   renderTable();
 });
 
-// Speed Test
+// Speed Test — with AbortController timeouts so nothing hangs
+function fetchWithTimeout(url, options, timeoutMs) {
+  var controller = new AbortController();
+  var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+  return fetch(url, Object.assign({}, options, { signal: controller.signal }))
+    .finally(function() { clearTimeout(timer); });
+}
+
 async function measurePing() {
-  const start = performance.now();
-  await fetch('https://speed.cloudflare.com/__down?bytes=1', { cache: 'no-store' });
+  var start = performance.now();
+  await fetchWithTimeout('https://speed.cloudflare.com/__down?bytes=1&t=' + Date.now(), { cache: 'no-store' }, 8000);
   return Math.round(performance.now() - start);
 }
 
 async function measureDownload() {
-  const start = performance.now();
-  const res = await fetch('https://speed.cloudflare.com/__down?bytes=5000000&t=' + Date.now(), { cache: 'no-store' });
+  var start = performance.now();
+  var res = await fetchWithTimeout('https://speed.cloudflare.com/__down?bytes=10000000&t=' + Date.now(), { cache: 'no-store' }, 20000);
   await res.arrayBuffer();
-  const elapsed = (performance.now() - start) / 1000;
-  return Math.round((5 * 8) / elapsed * 10) / 10;
+  var elapsed = (performance.now() - start) / 1000;
+  return Math.round((10 * 8) / elapsed * 10) / 10;
 }
 
 async function measureUpload() {
-  const bytes = 2000000;
-  const data = new Uint8Array(bytes);
-  const start = performance.now();
-  try { await fetch('https://speed.cloudflare.com/__up', { method: 'POST', body: data, cache: 'no-store' }); } catch(e) {}
-  const elapsed = (performance.now() - start) / 1000;
+  var bytes = 3000000;
+  var data = new Uint8Array(bytes);
+  var start = performance.now();
+  try {
+    await fetchWithTimeout('https://speed.cloudflare.com/__up', { method: 'POST', body: data, cache: 'no-store' }, 15000);
+  } catch(e) {
+    // If upload fails or times out, estimate from download speed
+    return null;
+  }
+  var elapsed = (performance.now() - start) / 1000;
   return Math.round((bytes * 8 / 1000000) / elapsed * 10) / 10;
 }
 
@@ -821,11 +833,18 @@ document.getElementById('runTestBtn').addEventListener('click', async function()
     document.getElementById('dlInput').value = dl;
 
     status.textContent = 'Measuring upload speed...';
-    const ul = await measureUpload();
-    document.getElementById('ulVal').textContent = ul;
-    document.getElementById('ulInput').value = ul;
-
-    status.textContent = 'Test complete! Fill in your hotel details below.';
+    var ul = await measureUpload();
+    if (ul === null) {
+      // Upload blocked by browser — estimate as ~40% of download
+      ul = Math.round(dl * 0.4 * 10) / 10;
+      document.getElementById('ulVal').textContent = ul + '*';
+      document.getElementById('ulInput').value = ul;
+      status.textContent = 'Test complete! (Upload estimated — enter manually if you know it.)';
+    } else {
+      document.getElementById('ulVal').textContent = ul;
+      document.getElementById('ulInput').value = ul;
+      status.textContent = 'Test complete! Fill in your hotel details below.';
+    }
     btn.textContent = 'Run Again';
   } catch(e) {
     status.textContent = 'Test failed. Please enter your speeds manually.';
