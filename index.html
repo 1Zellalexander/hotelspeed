@@ -555,6 +555,18 @@ function timedFetch(url, opts, ms) {
     .finally(function(){ clearTimeout(t); });
 }
 
+// Get TTFB from PerformanceResourceTiming API (most accurate browser ping)
+// Falls back to manual timing if browser blocks cross-origin timing
+function getTTFB(url) {
+  var entries = performance.getEntriesByType('resource');
+  for (var i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].name.indexOf(url) === 0 && entries[i].responseStart > 0) {
+      return Math.round(entries[i].responseStart - entries[i].requestStart);
+    }
+  }
+  return null;
+}
+
 async function runSpeedTest() {
   var btn    = document.getElementById('runBtn');
   var status = document.getElementById('testStatus');
@@ -562,53 +574,83 @@ async function runSpeedTest() {
   btn.textContent = 'Testing…';
 
   var ping = null, dl = null, ul = null;
+  var BASE = 'https://speed.cloudflare.com/__down?bytes=1';
 
-  // Ping — warmup first (clears DNS/TCP/TLS cost), then min of 5 samples
+  // ── PING ──────────────────────────────────────────
+  // Strategy: 2 warmup requests, then 8 measured samples.
+  // Use PerformanceTiming TTFB where available (most accurate),
+  // fall back to manual timer. Take median of middle 4 to kill outliers.
   try {
-    status.textContent = 'Measuring ping…';
-    // Throwaway warmup request — establishes the connection
-    await timedFetch('https://speed.cloudflare.com/__down?bytes=1&t=' + Date.now(), { cache:'no-store' }, 8000);
-    // 5 timed requests on the warm connection
-    var samples = [];
-    for (var pi = 0; pi < 5; pi++) {
-      var t0 = performance.now();
-      await timedFetch('https://speed.cloudflare.com/__down?bytes=1&t=' + Date.now(), { cache:'no-store' }, 8000);
-      samples.push(Math.round(performance.now() - t0));
+    status.textContent = 'Warming up connection…';
+    performance.clearResourceTimings();
+    // Two warmups to fully settle TCP + TLS + HTTP/2 stream
+    await timedFetch(BASE + '&w=1&t=' + Date.now(), { cache:'no-store' }, 8000);
+    await timedFetch(BASE + '&w=2&t=' + Date.now(), { cache:'no-store' }, 8000);
+
+    status.textContent = 'Measuring ping (8 samples)…';
+    var pingSamples = [];
+    for (var pi = 0; pi < 8; pi++) {
+      performance.clearResourceTimings();
+      var pingUrl = BASE + '&pi=' + pi + '&t=' + Date.now();
+      var pt0 = performance.now();
+      await timedFetch(pingUrl, { cache:'no-store' }, 8000);
+      var manualMs = Math.round(performance.now() - pt0);
+      // Prefer TTFB from PerformanceTiming (strips out JS overhead)
+      var ttfb = getTTFB('https://speed.cloudflare.com/__down');
+      pingSamples.push(ttfb !== null ? ttfb : manualMs);
     }
-    // Minimum = best-case latency, same method real ping tools use
-    ping = Math.min.apply(null, samples);
+    // Sort, discard top 2 and bottom 2, take median of remaining 4
+    pingSamples.sort(function(a, b){ return a - b; });
+    var trimmed = pingSamples.slice(2, 6);
+    ping = Math.round(trimmed.reduce(function(s,v){ return s+v; }, 0) / trimmed.length);
     document.getElementById('pingVal').textContent = ping;
     document.getElementById('fPing').value = ping;
-  } catch(e) { status.textContent = 'Ping failed — check your connection and try again.'; btn.disabled = false; btn.textContent = 'Try Again'; return; }
+  } catch(e) {
+    status.textContent = 'Ping failed — check your connection and try again.';
+    btn.disabled = false; btn.textContent = 'Try Again'; return;
+  }
 
-  // Download
+  // ── DOWNLOAD ──────────────────────────────────────
+  // Two 25 MB runs, averaged for accuracy
   try {
-    status.textContent = 'Measuring download…';
-    var t1 = performance.now();
-    var res = await timedFetch('https://speed.cloudflare.com/__down?bytes=10000000&t=' + Date.now(), { cache:'no-store' }, 25000);
-    await res.arrayBuffer();
-    var secs = (performance.now() - t1) / 1000;
-    dl = Math.round((10 * 8) / secs * 10) / 10;
+    var dlRuns = [];
+    for (var di = 0; di < 2; di++) {
+      status.textContent = 'Measuring download… (run ' + (di+1) + ' of 2)';
+      var dt0 = performance.now();
+      var dres = await timedFetch('https://speed.cloudflare.com/__down?bytes=25000000&t=' + Date.now(), { cache:'no-store' }, 45000);
+      await dres.arrayBuffer();
+      var dsecs = (performance.now() - dt0) / 1000;
+      dlRuns.push((25 * 8) / dsecs);
+    }
+    dl = Math.round((dlRuns[0] + dlRuns[1]) / 2 * 10) / 10;
     document.getElementById('dlVal').textContent = dl;
     document.getElementById('fDl').value = dl;
-  } catch(e) { dl = 0; status.textContent = 'Download test failed — you can enter your speed manually.'; }
+  } catch(e) {
+    dl = 0;
+    status.textContent = 'Download test failed — enter your speed manually.';
+  }
 
-  // Upload
+  // ── UPLOAD ────────────────────────────────────────
+  // Two 5 MB runs, averaged
   try {
-    status.textContent = 'Measuring upload…';
-    var payload = new Uint8Array(3000000);
-    var t2 = performance.now();
-    await timedFetch('https://speed.cloudflare.com/__up', { method:'POST', body:payload, cache:'no-store' }, 15000);
-    var secs2 = (performance.now() - t2) / 1000;
-    ul = Math.round((3 * 8) / secs2 * 10) / 10;
+    status.textContent = 'Measuring upload… (run 1 of 2)';
+    var ulRuns = [];
+    for (var ui = 0; ui < 2; ui++) {
+      if (ui === 1) status.textContent = 'Measuring upload… (run 2 of 2)';
+      var payload = new Uint8Array(5000000);
+      var ut0 = performance.now();
+      await timedFetch('https://speed.cloudflare.com/__up', { method:'POST', body:payload, cache:'no-store' }, 20000);
+      var usecs = (performance.now() - ut0) / 1000;
+      ulRuns.push((5 * 8) / usecs);
+    }
+    ul = Math.round((ulRuns[0] + ulRuns[1]) / 2 * 10) / 10;
     document.getElementById('ulVal').textContent = ul;
     document.getElementById('fUl').value = ul;
     status.textContent = 'Test complete! Fill in your hotel details below.';
   } catch(e) {
-    // Upload blocked by browser — estimate
     ul = dl ? Math.round(dl * 0.4 * 10) / 10 : null;
     if (ul) { document.getElementById('ulVal').textContent = ul + '*'; document.getElementById('fUl').value = ul; }
-    status.textContent = 'Done! Upload estimated (marked *) — you can correct it manually.';
+    status.textContent = 'Done! Upload estimated* — correct it manually if needed.';
   }
 
   btn.disabled = false;
