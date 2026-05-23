@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.3 — asks for location before testing (proceeds either way; results without location are flagged "unverified" and shown in an alternate colour); runs 3 full tests back-to-back, shows each, and combines them via drop-worst-average-two. Builds on v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
+<!-- HotelSpeed v2.2 — upload-weighted speed test: custom measurements ladder (SPEED_MEASUREMENTS) adds extra upload samples + a 100MB upload step for better upload accuracy on fast uplinks. Builds on v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -148,23 +148,6 @@
     #runBtn:hover { background: var(--accent2); }
     #runBtn:disabled { opacity: .55; cursor: not-allowed; }
     #testStatus { font-size: 13px; color: var(--muted); margin-top: 12px; min-height: 18px; }
-
-    /* ── Multi-run display ── */
-    .combined-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 16px; min-height: 14px; }
-    .combined-label.show { color: var(--accent); font-weight: 700; }
-    .run-rows { display: flex; flex-direction: column; gap: 6px; max-width: 380px; margin: 6px auto 0; }
-    .run-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 980px; font-size: 13px; opacity: .5; transition: opacity .2s, box-shadow .2s; }
-    .run-row.active { opacity: 1; box-shadow: 0 0 0 2px var(--accent-light); }
-    .run-row.done { opacity: 1; }
-    .run-name { font-weight: 600; color: var(--muted); white-space: nowrap; }
-    .run-vals { color: var(--text); }
-    .run-vals b { font-weight: 700; }
-    .run-pending { color: var(--muted); font-style: italic; }
-    .loc-status { font-size: 12px; color: #92400e; background: #fef3c7; border-radius: var(--r-sm); padding: 9px 13px; margin-top: 12px; text-align: left; }
-    .widget-foot { font-size: 11px; color: var(--muted); margin-top: 12px; }
-    /* unverified-location styling (table rows + badge) */
-    tr.unverified td { background: #fff8ec; }
-    .badge.unverified { background: #fef3c7; color: #92400e; }
 
     /* ── Form ── */
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -319,17 +302,14 @@
     <p class="sub">Run the speed test, add your hotel details, and help other travelers.</p>
 
     <div class="speed-widget">
-      <button id="runBtn">&#9654; Run Speed Test (3&times;)</button>
-      <div class="combined-label" id="combinedLabel">Runs 3 tests &amp; combines them</div>
+      <button id="runBtn">&#9654; Run Speed Test</button>
       <div class="speed-nums">
         <div class="speed-num"><div class="val" id="dlVal">—</div><div class="unit">Mbps</div><div class="lbl">Download</div></div>
         <div class="speed-num"><div class="val" id="ulVal">—</div><div class="unit">Mbps</div><div class="lbl">Upload</div></div>
         <div class="speed-num"><div class="val" id="pingVal">—</div><div class="unit">ms</div><div class="lbl">Ping</div></div>
       </div>
-      <div id="runRows" class="run-rows"></div>
       <div id="testStatus">Click the button to measure your connection speed.</div>
-      <div id="locStatus" class="loc-status" style="display:none"></div>
-      <div class="widget-foot">Runs 3 full tests back-to-back &middot; uses significant data on fast connections &middot; powered by Cloudflare (results may be collected by Cloudflare)</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:10px">Powered by Cloudflare&rsquo;s global network &middot; results may be collected by Cloudflare</div>
     </div>
 
     <form id="form">
@@ -476,17 +456,14 @@ function speedColor(mbps) { return mbps >= 50 ? '#34c759' : mbps >= 10 ? '#ff9f0
 function addMarker(row) {
   if (!map || !markersLayer || !row.lat || !row.lon) return;
   try {
-    var unv = (row.location_verified === false);
     var color = speedColor(row.download_mbps);
-    var border = unv ? '2.5px dashed #b08900' : '2.5px solid #fff';
     var icon = L.divIcon({
       className: '',
-      html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:' + border + ';box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
+      html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
       iconSize: [13,13], iconAnchor: [6,6]
     });
     var html = '<div class="p-name">' + row.hotel_name + '</div>' +
       '<div class="p-row"><span>' + row.city + ', ' + row.country + '</span></div>' +
-      (unv ? '<div class="p-row" style="color:#92400e">&#9888; Location unverified</div>' : '') +
       '<div style="margin:8px 0 6px;display:flex;gap:6px">' +
         '<span class="badge ' + speedClass(row.download_mbps) + '">' + speedLabel(row.download_mbps) + '</span>' +
         '<span class="badge ' + row.connection_type + '">' + (row.connection_type === 'wired' ? 'Wired' : 'Wireless') + '</span>' +
@@ -570,10 +547,8 @@ function renderTable() {
   tbody.innerHTML = rows.map(function(r) {
     var d = new Date(r.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
     var dist = distCity && r.lat ? ' <span style="font-size:12px;color:var(--muted)">(' + Math.round(haversine(distCity.lat,distCity.lon,r.lat,r.lon)) + ' km)</span>' : '';
-    var unv = (r.location_verified === false);
-    var unvBadge = unv ? ' <span class="badge unverified" title="Submitted without location permission">unverified</span>' : '';
-    return '<tr' + (unv ? ' class="unverified"' : '') + '>' +
-      '<td><div class="h-name">' + r.hotel_name + unvBadge + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
+    return '<tr>' +
+      '<td><div class="h-name">' + r.hotel_name + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
       '<td><span class="badge ' + speedClass(r.download_mbps) + '">' + r.download_mbps + ' Mbps</span></td>' +
       '<td>' + r.upload_mbps + ' Mbps</td>' +
       '<td>' + r.ping_ms + ' ms</td>' +
@@ -619,7 +594,6 @@ var geoAsked = false;               // only ever prompt once per page load
 var LOCATION_WARN_KM = 200;         // warn if the typed city is farther than this
 var nearbyHotels = [];              // [{name, lat, lon, dist}] fetched from Overpass on location
 var selectedHotel = null;           // {name, lat, lon} once the user picks a suggestion
-var locationVerified = false;       // true once device location is granted for the current test
 
 function setGeoNote(txt) {
   var el = document.getElementById('geoNote');
@@ -644,27 +618,6 @@ function captureLocation() {
     },
     { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
   );
-}
-
-// Promise wrapper used to GATE the test: resolves true if location is granted
-// (and loads city + nearby hotels), false if denied/unavailable/timed out.
-function requestLocation() {
-  return new Promise(function (resolve) {
-    if (userGeo) return resolve(true);                  // already granted earlier
-    if (!navigator.geolocation) return resolve(false);
-    geoAsked = true;
-    navigator.geolocation.getCurrentPosition(
-      function (pos) {
-        userGeo = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
-        setGeoNote('Using your device location to check the city and place the map pin accurately.');
-        autofillFromGeo();
-        loadNearbyHotels();
-        resolve(true);
-      },
-      function (err) { console.info('Location not available:', err && err.message); resolve(false); },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 300000 }
-    );
-  });
 }
 
 async function autofillFromGeo() {
@@ -891,12 +844,12 @@ function measureUpload(cfg, onUpdate) {
 // ---- BUILT-IN (FALLBACK) TEST --------------------------------------
 // The v1.7 hand-rolled test. Used only if the Cloudflare engine can't
 // load. Button state is managed by runSpeedTest(), not in here.
-async function runManualSpeedTest(quiet) {
+async function runManualSpeedTest() {
   var dlEl = document.getElementById('dlVal');
   var ulEl = document.getElementById('ulVal');
   var pgEl = document.getElementById('pingVal');
 
-  var dl = null, ul = null, ping = null, estimated = false;
+  var dl = null, ul = null, ping = null;
 
   // PING
   try {
@@ -905,7 +858,8 @@ async function runManualSpeedTest(quiet) {
     ping = p.ping;
     if (ping !== null) {
       pgEl.textContent = ping;
-      if (!quiet) setStatus('Ping ' + ping + ' ms' + (p.jitter !== null ? '  (±' + p.jitter + ' ms jitter)' : ''));
+      document.getElementById('fPing').value = ping;
+      setStatus('Ping ' + ping + ' ms' + (p.jitter !== null ? '  (±' + p.jitter + ' ms jitter)' : ''));
     }
   } catch (e) { setStatus('Ping could not be measured — continuing…'); }
 
@@ -917,6 +871,7 @@ async function runManualSpeedTest(quiet) {
     });
     dl = fmt(dlMbps);
     dlEl.textContent = dl;
+    document.getElementById('fDl').value = dl;
   } catch (e) {
     dl = 0; setStatus('Download test failed — you can enter your speed manually.');
   }
@@ -930,19 +885,19 @@ async function runManualSpeedTest(quiet) {
     if (up.ok && up.mbps > 0) {
       ul = fmt(up.mbps);
       ulEl.textContent = ul;
-      if (!quiet) setStatus('Test complete!  ↓ ' + dl + ' · ↑ ' + ul +
+      document.getElementById('fUl').value = ul;
+      setStatus('Test complete!  ↓ ' + dl + ' · ↑ ' + ul +
                 ' · ping ' + (ping !== null ? ping + ' ms' : '—') +
                 '. Fill in your hotel details below.');
     } else {
       throw new Error('upload blocked');
     }
   } catch (e) {
-    ul = dl ? fmt(dl * 0.4) : null; estimated = true;
-    if (ul) ulEl.textContent = ul + '*';
-    if (!quiet) setStatus('Done! Upload couldn’t be measured in this browser, so it’s estimated* — edit it if you know the real number.');
+    ul = dl ? fmt(dl * 0.4) : null;
+    if (ul) { ulEl.textContent = ul + '*'; document.getElementById('fUl').value = ul; }
+    setStatus('Done! Upload couldn’t be measured in this browser, so it’s estimated* — edit it if you know the real number.');
   }
 
-  return { dl: dl, ul: ul, ping: ping, estimated: estimated };
 }
 
 // ---- CLOUDFLARE ENGINE: readiness helper ---------------------------
@@ -996,7 +951,7 @@ var SPEED_MEASUREMENTS = [
 ];
 
 // ---- CLOUDFLARE TEST: run engine, map results into UI + form -------
-function runCloudflareTest(Engine, quiet) {
+function runCloudflareTest(Engine) {
   return new Promise(function (resolve, reject) {
     function valid(x) { return x != null && x > 0; }
     var dlEl = document.getElementById('dlVal');
@@ -1021,23 +976,22 @@ function runCloudflareTest(Engine, quiet) {
       try { engine && engine.pause && engine.pause(); } catch (e) {}
       if (got.dl == null) { reject(new Error('cloudflare: no download')); return; }
 
+      dlEl.textContent = got.dl; document.getElementById('fDl').value = got.dl;
+      if (got.ping != null) { pgEl.textContent = got.ping; document.getElementById('fPing').value = got.ping; }
+
       var estimated = false;
       if (got.ul == null) { got.ul = fmt(got.dl * 0.4); estimated = true; }
-      // live big display for this run (orchestrator fills the form with the COMBINED result)
-      dlEl.textContent = got.dl;
       ulEl.textContent = got.ul + (estimated ? '*' : '');
-      if (got.ping != null) pgEl.textContent = got.ping;
+      document.getElementById('fUl').value = got.ul;
 
-      if (!quiet) {
-        var jit = (jitter != null) ? '  (±' + Math.round(jitter) + ' ms jitter)' : '';
-        var msg = 'Test complete!  ↓ ' + got.dl + ' · ↑ ' + got.ul + (estimated ? '*' : '') +
-                  ' · ping ' + (got.ping != null ? got.ping + ' ms' : '—') + jit + '.';
-        msg += estimated
-          ? '  Upload couldn’t be measured in this browser, so it’s estimated.'
-          : '  Fill in your hotel details below.';
-        setStatus(msg);
-      }
-      resolve({ dl: got.dl, ul: got.ul, ping: got.ping, estimated: estimated });
+      var jit = (jitter != null) ? '  (±' + Math.round(jitter) + ' ms jitter)' : '';
+      var msg = 'Test complete!  ↓ ' + got.dl + ' · ↑ ' + got.ul + (estimated ? '*' : '') +
+                ' · ping ' + (got.ping != null ? got.ping + ' ms' : '—') + jit + '.';
+      msg += estimated
+        ? '  Upload couldn’t be measured in this browser, so it’s estimated — edit it if you know the real number.'
+        : '  Fill in your hotel details below.';
+      setStatus(msg);
+      resolve();
     }
 
     try { engine = new Engine({ autoStart: false, measurements: SPEED_MEASUREMENTS }); }
@@ -1077,124 +1031,32 @@ function resetReadings() {
   ['dlVal', 'ulVal', 'pingVal'].forEach(function (id) { document.getElementById(id).textContent = '—'; });
 }
 
-// ---- MULTI-RUN HELPERS --------------------------------------------
-function buildRunRows() {
-  var c = document.getElementById('runRows');
-  var h = '';
-  for (var i = 1; i <= 3; i++) {
-    h += '<div class="run-row" id="run-row-' + i + '"><span class="run-name">Run ' + i + '</span>' +
-         '<span class="run-vals run-pending">waiting…</span></div>';
-  }
-  c.innerHTML = h;
-}
-function setRunActive(i) {
-  var el = document.getElementById('run-row-' + i); if (!el) return;
-  el.classList.add('active');
-  var v = el.querySelector('.run-vals'); v.className = 'run-vals run-pending'; v.textContent = 'testing…';
-}
-function setRunResult(i, res) {
-  var el = document.getElementById('run-row-' + i); if (!el) return;
-  el.classList.remove('active'); el.classList.add('done');
-  var ulTxt = (res.ul != null) ? (res.ul + (res.estimated ? '*' : '')) : '—';
-  var v = el.querySelector('.run-vals'); v.className = 'run-vals';
-  v.innerHTML = '<b>' + (res.dl != null ? res.dl : '—') + '</b> &#8595; &nbsp; <b>' + ulTxt +
-                '</b> &#8593; &nbsp; <b>' + (res.ping != null ? res.ping : '—') + '</b> ms';
-}
-
-// Combine the 3 runs: drop the single worst run, average the other two,
-// per metric. "Worst" = lowest for download/upload, highest for ping.
-function combineRuns(runs) {
-  function pick(vals, lowerIsBetter) {
-    vals = vals.filter(function (v) { return v != null && v > 0; });
-    if (!vals.length) return null;
-    if (vals.length === 1) return vals[0];
-    if (vals.length === 2) return (vals[0] + vals[1]) / 2;
-    var s = vals.slice().sort(function (a, b) { return a - b; });
-    if (lowerIsBetter) s.pop(); else s.shift();         // drop the single worst
-    return s.reduce(function (a, b) { return a + b; }, 0) / s.length;
-  }
-  var dl   = pick(runs.map(function (r) { return r.dl; }), false);
-  var ping = pick(runs.map(function (r) { return r.ping; }), true);
-  // Upload: prefer REAL (non-estimated) values; estimate only if none are real.
-  var realUls = runs.filter(function (r) { return r.ul != null && !r.estimated; }).map(function (r) { return r.ul; });
-  var ul, estimated = false;
-  if (realUls.length) { ul = pick(realUls, false); }
-  else { ul = (dl != null) ? dl * 0.4 : null; estimated = true; }
-  return {
-    dl:   dl   != null ? fmt(dl)          : null,
-    ul:   ul   != null ? fmt(ul)          : null,
-    ping: ping != null ? Math.round(ping) : null,
-    estimated: estimated
-  };
-}
-
-function showCombined(c) {
-  document.getElementById('dlVal').textContent   = c.dl   != null ? c.dl : '—';
-  document.getElementById('ulVal').textContent   = c.ul   != null ? (c.ul + (c.estimated ? '*' : '')) : '—';
-  document.getElementById('pingVal').textContent = c.ping != null ? c.ping : '—';
-  var lbl = document.getElementById('combinedLabel');
-  lbl.textContent = 'Combined result · best 2 of 3 runs';
-  lbl.classList.add('show');
-}
-
-// Run ONE full test (Cloudflare engine, with built-in fallback). Returns
-// { dl, ul, ping, estimated } and updates the big live display as it goes.
-async function runOneTest() {
-  resetReadings();
-  var Engine = await cfEngineReady(6000);
-  if (Engine) {
-    try { return await runCloudflareTest(Engine, true); }
-    catch (e) { console.warn('Cloudflare run failed; built-in fallback for this run.', e); }
-  }
-  return await runManualSpeedTest(true);
-}
-
-// ---- ORCHESTRATION: location gate -> 3 runs -> combine ------------
+// ---- ORCHESTRATION: Cloudflare first, built-in fallback -----------
 async function runSpeedTest() {
   var btn = document.getElementById('runBtn');
-  if (btn.dataset.running === '1') return;             // ignore double-clicks / re-entry
+  if (btn.dataset.running === '1') return;            // ignore double-clicks / re-entry
   btn.dataset.running = '1';
   btn.disabled = true; btn.textContent = 'Testing…';
   resetReadings();
-  buildRunRows();
-  var lbl = document.getElementById('combinedLabel');
-  lbl.classList.remove('show'); lbl.textContent = '';
+  captureLocation();   // ask once for location (used to verify the city + place the pin)
 
-  // LOCATION GATE — ask first, then proceed either way.
-  setStatus('Requesting your location…');
-  locationVerified = await requestLocation();
-  var locEl = document.getElementById('locStatus');
-  if (locationVerified) {
-    locEl.style.display = 'none';
-  } else {
-    locEl.style.display = 'block';
-    locEl.textContent = '⚠ Location not allowed — this result will be saved as “location unverified.” You can still test and submit.';
+  try {
+    setStatus('Loading speed-test engine…');
+    var Engine = await cfEngineReady(6000);
+    if (Engine) {
+      await runCloudflareTest(Engine);
+    } else {
+      setStatus('Cloudflare engine unavailable — using built-in test…');
+      await runManualSpeedTest();
+    }
+  } catch (e) {
+    console.warn('Cloudflare test failed; using built-in fallback.', e);
+    setStatus('Cloudflare test unavailable — switching to the built-in test…');
+    resetReadings();
+    try { await runManualSpeedTest(); } catch (e2) { console.error(e2); }
   }
 
-  // 3 RUNS, back-to-back.
-  var runs = [];
-  for (var i = 1; i <= 3; i++) {
-    setRunActive(i);
-    setStatus('Running test ' + i + ' of 3…');
-    var res = await runOneTest();
-    runs.push(res);
-    setRunResult(i, res);
-  }
-
-  // COMBINE + fill the form with the combined result.
-  var combined = combineRuns(runs);
-  showCombined(combined);
-  if (combined.dl   != null) document.getElementById('fDl').value   = combined.dl;
-  if (combined.ul   != null) document.getElementById('fUl').value   = combined.ul;
-  if (combined.ping != null) document.getElementById('fPing').value = combined.ping;
-
-  setStatus('All 3 runs done. Combined: ↓ ' + (combined.dl != null ? combined.dl : '—') +
-            ' · ↑ ' + (combined.ul != null ? combined.ul + (combined.estimated ? '*' : '') : '—') +
-            ' · ping ' + (combined.ping != null ? combined.ping + ' ms' : '—') + '.' +
-            (combined.estimated ? ' Upload estimated (couldn’t be measured in this browser).' : '') +
-            ' Fill in your hotel details below.');
-
-  btn.disabled = false; btn.textContent = 'Run Again (3×)';
+  btn.disabled = false; btn.textContent = 'Run Again';
   btn.dataset.running = '';
 }
 
@@ -1262,7 +1124,6 @@ document.getElementById('form').addEventListener('submit', async function(e) {
     city: city, country: country, connection_type: conn,
     download_mbps: dl, upload_mbps: ul, ping_ms: png,
     room_floor: document.getElementById('fRoom').value.trim() || null,
-    location_verified: !!userGeo,
     lat: pinLat, lon: pinLon
   };
 
@@ -1284,8 +1145,9 @@ document.getElementById('form').addEventListener('submit', async function(e) {
   btn.disabled = false; btn.textContent = 'Submit My Result';
 });
 
-// Location is requested when the user taps Run (the test is gated on it),
-// so we no longer prompt on field focus.
+// Also ask for location as soon as the user engages the form (one prompt only).
+document.getElementById('fName').addEventListener('focus', captureLocation);
+document.getElementById('fCity').addEventListener('focus', captureLocation);
 
 // =====================================================
 // HOTEL TYPE-TO-SEARCH (nearby hotels via Overpass / OSM)
@@ -1413,9 +1275,6 @@ function resetForm() {
   document.getElementById('form').reset();
   ['dlVal','ulVal','pingVal'].forEach(function(id){ document.getElementById(id).textContent = '—'; });
   document.getElementById('testStatus').textContent = 'Click the button to measure your connection speed.';
-  var rr = document.getElementById('runRows'); if (rr) rr.innerHTML = '';
-  var cl = document.getElementById('combinedLabel'); if (cl) { cl.classList.remove('show'); cl.textContent = 'Runs 3 tests & combines them'; }
-  var ls = document.getElementById('locStatus'); if (ls) ls.style.display = 'none';
   setGeoNote('');
   selectedHotel = null;
   var hr = document.getElementById('hotelResults'); if (hr) hr.style.display = 'none';
