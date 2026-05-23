@@ -563,12 +563,20 @@ async function runSpeedTest() {
 
   var ping = null, dl = null, ul = null;
 
-  // Ping
+  // Ping — warmup first (clears DNS/TCP/TLS cost), then min of 5 samples
   try {
     status.textContent = 'Measuring ping…';
-    var t0 = performance.now();
+    // Throwaway warmup request — establishes the connection
     await timedFetch('https://speed.cloudflare.com/__down?bytes=1&t=' + Date.now(), { cache:'no-store' }, 8000);
-    ping = Math.round(performance.now() - t0);
+    // 5 timed requests on the warm connection
+    var samples = [];
+    for (var pi = 0; pi < 5; pi++) {
+      var t0 = performance.now();
+      await timedFetch('https://speed.cloudflare.com/__down?bytes=1&t=' + Date.now(), { cache:'no-store' }, 8000);
+      samples.push(Math.round(performance.now() - t0));
+    }
+    // Minimum = best-case latency, same method real ping tools use
+    ping = Math.min.apply(null, samples);
     document.getElementById('pingVal').textContent = ping;
     document.getElementById('fPing').value = ping;
   } catch(e) { status.textContent = 'Ping failed — check your connection and try again.'; btn.disabled = false; btn.textContent = 'Try Again'; return; }
