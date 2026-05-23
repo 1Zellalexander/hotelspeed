@@ -381,6 +381,13 @@
   <div class="spinner"></div>
   <span>Loading HotelSpeed…</span>
 </div>
+<!-- Emergency hide: runs immediately, before any other JS can fail -->
+<script>
+  setTimeout(function() {
+    var o = document.getElementById('loadingOverlay');
+    if (o) { o.style.opacity = '0'; setTimeout(function(){ o.style.display='none'; }, 400); }
+  }, 3000);
+</script>
 
 <nav>
   <a class="nav-logo" href="#">Hotel<span>Speed</span></a>
