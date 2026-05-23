@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.2 — upload-weighted speed test: custom measurements ladder (SPEED_MEASUREMENTS) adds extra upload samples + a 100MB upload step for better upload accuracy on fast uplinks. Builds on v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
+<!-- HotelSpeed v2.5 — v2.4 plus an explicit "Use my location" button with clear status feedback (Requesting / Location on / blocked-with-instructions). NOTE: the browser only shows its native Allow-Location popup over HTTPS AND when no decision is already stored for the site; JS can request location but cannot force the popup. The button gives definitive feedback either way. Builds on v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -97,6 +97,12 @@
     .slow { background: #fee2e2; color: #991b1b; }
     .wired    { background: #e0f2fe; color: #0369a1; }
     .wireless { background: #f3e8ff; color: #7e22ce; }
+    .badge.unverified { background: #fef3c7; color: #92400e; }
+    .loc-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; }
+    #locBtn { padding: 10px 18px; font-size: 14px; white-space: nowrap; }
+    .loc-stat { font-size: 13px; color: var(--muted); flex: 1; min-width: 200px; line-height: 1.45; }
+    .loc-stat.ok  { color: #065f46; font-weight: 600; }
+    .loc-stat.err { color: #92400e; }
 
     /* ── Filters ── */
     .filters { display: flex; gap: 12px; margin: 20px 0 12px; flex-wrap: wrap; align-items: center; }
@@ -124,6 +130,7 @@
     td { padding: 14px 20px; border-bottom: 1px solid var(--border); vertical-align: middle; }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: var(--bg); }
+    tr.unverified td { background: #fff8ec; }
     .h-name { font-weight: 600; }
     .h-loc { font-size: 12px; color: var(--muted); margin-top: 2px; }
     .empty { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 15px; }
@@ -312,6 +319,11 @@
       <div style="font-size:11px;color:var(--muted);margin-top:10px">Powered by Cloudflare&rsquo;s global network &middot; results may be collected by Cloudflare</div>
     </div>
 
+    <div class="loc-row">
+      <button type="button" id="locBtn" class="btn btn-secondary">&#128205; Use my location</button>
+      <span id="locStatus2" class="loc-stat">Optional &mdash; fills your city &amp; marks your result as location-verified.</span>
+    </div>
+
     <form id="form">
       <div class="grid2">
         <div class="fg full">
@@ -456,14 +468,17 @@ function speedColor(mbps) { return mbps >= 50 ? '#34c759' : mbps >= 10 ? '#ff9f0
 function addMarker(row) {
   if (!map || !markersLayer || !row.lat || !row.lon) return;
   try {
+    var unv = (row.location_verified === false);
     var color = speedColor(row.download_mbps);
+    var border = unv ? '2.5px dashed #b08900' : '2.5px solid #fff';
     var icon = L.divIcon({
       className: '',
-      html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
+      html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:' + border + ';box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
       iconSize: [13,13], iconAnchor: [6,6]
     });
     var html = '<div class="p-name">' + row.hotel_name + '</div>' +
       '<div class="p-row"><span>' + row.city + ', ' + row.country + '</span></div>' +
+      (unv ? '<div class="p-row" style="color:#92400e">&#9888; Location unverified</div>' : '') +
       '<div style="margin:8px 0 6px;display:flex;gap:6px">' +
         '<span class="badge ' + speedClass(row.download_mbps) + '">' + speedLabel(row.download_mbps) + '</span>' +
         '<span class="badge ' + row.connection_type + '">' + (row.connection_type === 'wired' ? 'Wired' : 'Wireless') + '</span>' +
@@ -547,8 +562,10 @@ function renderTable() {
   tbody.innerHTML = rows.map(function(r) {
     var d = new Date(r.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
     var dist = distCity && r.lat ? ' <span style="font-size:12px;color:var(--muted)">(' + Math.round(haversine(distCity.lat,distCity.lon,r.lat,r.lon)) + ' km)</span>' : '';
-    return '<tr>' +
-      '<td><div class="h-name">' + r.hotel_name + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
+    var unv = (r.location_verified === false);
+    var unvBadge = unv ? ' <span class="badge unverified" title="Submitted without location permission">unverified</span>' : '';
+    return '<tr' + (unv ? ' class="unverified"' : '') + '>' +
+      '<td><div class="h-name">' + r.hotel_name + unvBadge + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
       '<td><span class="badge ' + speedClass(r.download_mbps) + '">' + r.download_mbps + ' Mbps</span></td>' +
       '<td>' + r.upload_mbps + ' Mbps</td>' +
       '<td>' + r.ping_ms + ' ms</td>' +
@@ -617,6 +634,44 @@ function captureLocation() {
       console.info('Location not available:', err && err.message);
     },
     { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
+  );
+}
+
+// Explicit, visible location request (the "Use my location" button) with
+// clear status feedback. The browser won't re-show its native popup once a
+// site's permission is remembered, so this always tells the user what
+// actually happened (on / blocked / unavailable).
+function useMyLocation() {
+  var s = document.getElementById('locStatus2');
+  if (!('geolocation' in navigator)) {
+    s.textContent = 'This browser can’t access location.'; s.className = 'loc-stat err'; return;
+  }
+  s.textContent = 'Requesting location…'; s.className = 'loc-stat';
+  geoAsked = true;
+  navigator.geolocation.getCurrentPosition(
+    function (pos) {
+      userGeo = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
+      s.textContent = '✓ Location on — using it for your map pin and to mark this result location-verified.';
+      s.className = 'loc-stat ok';
+      setGeoNote('');
+      autofillFromGeo();
+      loadNearbyHotels();
+    },
+    function (err) {
+      var msg;
+      if (err && err.code === 1) {            // PERMISSION_DENIED
+        msg = 'Location is blocked for this site. In Safari: tap the “ᴬA” at the left of the address bar → Website Settings → Location → Allow, then tap this button again. (Also check Settings → Privacy & Security → Location Services → Safari Websites is on.)';
+      } else if (err && err.code === 2) {     // POSITION_UNAVAILABLE
+        msg = 'Couldn’t determine your location right now — make sure Location Services is on, then try again.';
+      } else if (err && err.code === 3) {     // TIMEOUT
+        msg = 'Location request timed out — tap to try again.';
+      } else {
+        msg = 'Location unavailable — tap to try again.';
+      }
+      s.textContent = '⚠ ' + msg;
+      s.className = 'loc-stat err';
+    },
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
   );
 }
 
@@ -1061,6 +1116,7 @@ async function runSpeedTest() {
 }
 
 document.getElementById('runBtn').addEventListener('click', runSpeedTest);
+document.getElementById('locBtn').addEventListener('click', useMyLocation);
 
 // "Test My Speed" buttons — scroll then auto-start test
 function scrollAndTest(e) {
@@ -1124,6 +1180,7 @@ document.getElementById('form').addEventListener('submit', async function(e) {
     city: city, country: country, connection_type: conn,
     download_mbps: dl, upload_mbps: ul, ping_ms: png,
     room_floor: document.getElementById('fRoom').value.trim() || null,
+    location_verified: !!userGeo,
     lat: pinLat, lon: pinLon
   };
 
