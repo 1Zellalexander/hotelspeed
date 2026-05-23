@@ -629,19 +629,40 @@ let allData = [];
 let sortKey = 'download_desc';
 let distanceCity = null;
 
-async function loadData() {
-  if (DEMO_MODE) {
-    allData = SAMPLE_DATA;
-  } else {
-    const result = await supabase.from('speed_results').select('*').order('created_at', { ascending: false }).limit(500);
-    if (result.error) { console.error(result.error); allData = []; }
-    else { allData = result.data || []; }
+function hideOverlay() {
+  var overlay = document.getElementById('loadingOverlay');
+  if (overlay) {
+    overlay.style.opacity = '0';
+    setTimeout(function() { overlay.style.display = 'none'; }, 400);
   }
-  allData.forEach(makeMarker);
-  updateStats();
-  renderTable();
-  document.getElementById('loadingOverlay').style.opacity = '0';
-  setTimeout(function() { document.getElementById('loadingOverlay').style.display = 'none'; }, 400);
+}
+
+// Safety net: always hide the overlay after 6 seconds no matter what
+setTimeout(hideOverlay, 6000);
+
+async function loadData() {
+  try {
+    if (DEMO_MODE) {
+      allData = SAMPLE_DATA;
+    } else {
+      const result = await supabase.from('speed_results').select('*').order('created_at', { ascending: false }).limit(500);
+      if (result.error) { console.error(result.error); allData = []; }
+      else { allData = result.data || []; }
+    }
+    allData.forEach(function(row) {
+      try { makeMarker(row); } catch(e) { console.warn('Marker error:', e); }
+    });
+    updateStats();
+    renderTable();
+  } catch(err) {
+    console.error('loadData error:', err);
+    allData = SAMPLE_DATA;
+    try { allData.forEach(function(row) { makeMarker(row); }); } catch(e) {}
+    updateStats();
+    renderTable();
+  } finally {
+    hideOverlay();
+  }
 }
 
 function updateStats() {
