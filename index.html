@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v1.9 — adds optional device geolocation: auto-fills city/country, warns on large city mismatches (non-blocking), and uses precise coords for the map pin. Built on v1.8 (Cloudflare speed-test engine + built-in fallback). -->
+<!-- HotelSpeed v2.0 — adds type-to-search for nearby hotels (Overpass/OpenStreetMap) once location is known, with manual typing as fallback. Builds on v1.9 (geolocation) + v1.8 (Cloudflare speed-test engine + built-in fallback). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -163,6 +163,22 @@
     .fg input::placeholder { color: #b0b0b7; }
     .hint { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
+    /* ── Hotel type-to-search (autocomplete) ── */
+    .ac-wrap { position: relative; width: 100%; }
+    .ac-wrap input { width: 100%; }
+    .ac-list {
+      position: absolute; left: 0; right: 0; top: 100%; z-index: 60;
+      margin-top: 6px; background: var(--surface);
+      border: 1.5px solid var(--border); border-radius: var(--r-sm);
+      box-shadow: var(--shadow-lg); max-height: 264px; overflow-y: auto;
+    }
+    .ac-item { padding: 11px 14px; cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .ac-item:last-child { border-bottom: none; }
+    .ac-item:hover, .ac-item.active { background: var(--accent-light); }
+    .ac-name { font-size: 14px; font-weight: 600; color: var(--text); }
+    .ac-dist { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .ac-empty { padding: 11px 14px; font-size: 13px; color: var(--muted); }
+
     .toggle { display: flex; border: 1.5px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
     .toggle input[type=radio] { display: none; }
     .toggle label {
@@ -300,7 +316,11 @@
       <div class="grid2">
         <div class="fg full">
           <label>Hotel Name</label>
-          <input type="text" id="fName" placeholder="e.g. Grand Hyatt" required />
+          <div class="ac-wrap">
+            <input type="text" id="fName" placeholder="e.g. Grand Hyatt" autocomplete="off" required />
+            <div id="hotelResults" class="ac-list" style="display:none"></div>
+          </div>
+          <span class="hint" id="hotelHint" style="display:none">&nbsp;</span>
         </div>
         <div class="fg">
           <label>City</label>
@@ -566,6 +586,8 @@ async function geocode(q) {
 var userGeo = null;                 // { lat, lon, acc } once granted
 var geoAsked = false;               // only ever prompt once per page load
 var LOCATION_WARN_KM = 200;         // warn if the typed city is farther than this
+var nearbyHotels = [];              // [{name, lat, lon, dist}] fetched from Overpass on location
+var selectedHotel = null;           // {name, lat, lon} once the user picks a suggestion
 
 function setGeoNote(txt) {
   var el = document.getElementById('geoNote');
@@ -582,6 +604,7 @@ function captureLocation() {
       userGeo = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
       setGeoNote('Using your device location to check the city and place the map pin accurately.');
       autofillFromGeo();
+      loadNearbyHotels();
     },
     function (err) {
       // Denied / unavailable / timed out — stay silent (warn-don't-block).
@@ -1019,9 +1042,16 @@ document.getElementById('form').addEventListener('submit', async function(e) {
   var pinLat = cityCoords ? cityCoords.lat : null;
   var pinLon = cityCoords ? cityCoords.lon : null;
 
-  // Location sanity check (warn, never block). If the device's real
-  // position is far from the city they typed, ask before submitting.
-  if (userGeo && cityCoords) {
+  // Best pin source: a hotel picked from the nearby suggestions has exact
+  // mapped coordinates, so prefer those when available.
+  if (selectedHotel) {
+    pinLat = selectedHotel.lat; pinLon = selectedHotel.lon;
+  }
+
+  // Location sanity check (warn, never block). Skipped when a nearby hotel
+  // was picked (it's already near the user). Otherwise, if the device's real
+  // position is far from the typed city, ask before submitting.
+  if (!selectedHotel && userGeo && cityCoords) {
     var distKm = haversine(userGeo.lat, userGeo.lon, cityCoords.lat, cityCoords.lon);
     if (distKm > LOCATION_WARN_KM) {
       var proceed = confirm(
@@ -1070,11 +1100,138 @@ document.getElementById('form').addEventListener('submit', async function(e) {
 document.getElementById('fName').addEventListener('focus', captureLocation);
 document.getElementById('fCity').addEventListener('focus', captureLocation);
 
+// =====================================================
+// HOTEL TYPE-TO-SEARCH (nearby hotels via Overpass / OSM)
+// =====================================================
+// Once we have the device location we fetch nearby hotels once, then let the
+// user filter them by typing. Picking one fills the name + exact coordinates.
+// If location is denied or none are found, the field stays a normal text box
+// (manual fallback), so nothing breaks.
+
+function fmtDist(km) {
+  return km < 1 ? Math.round(km * 1000) + ' m' : (Math.round(km * 10) / 10) + ' km';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function showHotelHint(txt) {
+  var el = document.getElementById('hotelHint');
+  if (!el) return;
+  el.textContent = txt || '';
+  el.style.display = txt ? 'block' : 'none';
+}
+
+async function loadNearbyHotels() {
+  if (!userGeo || nearbyHotels.length) return;          // fetch once per page load
+  showHotelHint('Finding hotels near you…');
+  var types  = '^(hotel|motel|hostel|guest_house|resort)$';
+  var around = 'around:2500,' + userGeo.lat + ',' + userGeo.lon;
+  var q = '[out:json][timeout:25];(' +
+          'node["tourism"~"' + types + '"](' + around + ');' +
+          'way["tourism"~"' + types + '"](' + around + ');' +
+          ');out center 80;';
+  try {
+    var res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(q)
+    });
+    var d = await res.json();
+    var seen = {}, list = [];
+    (d.elements || []).forEach(function (el) {
+      var name = el.tags && el.tags.name;
+      if (!name) return;
+      var lat = (el.lat != null) ? el.lat : (el.center && el.center.lat);
+      var lon = (el.lon != null) ? el.lon : (el.center && el.center.lon);
+      if (lat == null || lon == null) return;
+      var key = name.toLowerCase();
+      if (seen[key]) return;                              // dedupe node + way duplicates
+      seen[key] = true;
+      list.push({ name: name, lat: lat, lon: lon, dist: haversine(userGeo.lat, userGeo.lon, lat, lon) });
+    });
+    list.sort(function (a, b) { return a.dist - b.dist; });
+    nearbyHotels = list;
+    if (nearbyHotels.length) {
+      showHotelHint('Start typing to pick from ' + nearbyHotels.length + ' nearby hotels — or just type the name yourself.');
+    } else {
+      showHotelHint('No nearby hotels in the map data — just type your hotel’s name.');
+    }
+  } catch (e) {
+    nearbyHotels = [];
+    showHotelHint('Could not load nearby hotels — just type your hotel’s name.');
+  }
+}
+
+function renderHotelResults() {
+  var input = document.getElementById('fName');
+  var box   = document.getElementById('hotelResults');
+  if (!box) return;
+  if (!nearbyHotels.length) { box.style.display = 'none'; return; }
+  var q = input.value.trim().toLowerCase();
+  var matches = q
+    ? nearbyHotels.filter(function (h) { return h.name.toLowerCase().indexOf(q) !== -1; })
+    : nearbyHotels.slice();
+  matches = matches.slice(0, 8);
+  if (!matches.length) {
+    box.innerHTML = '<div class="ac-empty">No nearby match — press Enter to use what you typed.</div>';
+    box.style.display = 'block';
+    return;
+  }
+  box.innerHTML = matches.map(function (h) {
+    return '<div class="ac-item" data-i="' + nearbyHotels.indexOf(h) + '">' +
+             '<span class="ac-name">' + escapeHtml(h.name) + '</span>' +
+             '<span class="ac-dist">' + fmtDist(h.dist) + '</span>' +
+           '</div>';
+  }).join('');
+  box.style.display = 'block';
+}
+
+function chooseHotel(h) {
+  if (!h) return;
+  document.getElementById('fName').value = h.name;
+  selectedHotel = { name: h.name, lat: h.lat, lon: h.lon };
+  document.getElementById('hotelResults').style.display = 'none';
+}
+
+(function wireHotelSearch() {
+  var input = document.getElementById('fName');
+  var box   = document.getElementById('hotelResults');
+  if (!input || !box) return;
+  input.addEventListener('input', function () { selectedHotel = null; renderHotelResults(); });
+  input.addEventListener('focus', renderHotelResults);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && box.style.display === 'block') {
+      var first = box.querySelector('.ac-item');
+      if (first) { e.preventDefault(); chooseHotel(nearbyHotels[parseInt(first.dataset.i, 10)]); }
+    } else if (e.key === 'Escape') {
+      box.style.display = 'none';
+    }
+  });
+  box.addEventListener('click', function (e) {
+    var item = e.target.closest ? e.target.closest('.ac-item') : null;
+    if (!item) return;
+    chooseHotel(nearbyHotels[parseInt(item.dataset.i, 10)]);
+  });
+  document.addEventListener('click', function (e) {
+    var wrap = input.closest ? input.closest('.ac-wrap') : null;
+    if (wrap && !wrap.contains(e.target)) box.style.display = 'none';
+  });
+})();
+
 function resetForm() {
   document.getElementById('form').reset();
   ['dlVal','ulVal','pingVal'].forEach(function(id){ document.getElementById(id).textContent = '—'; });
   document.getElementById('testStatus').textContent = 'Click the button to measure your connection speed.';
   setGeoNote('');
+  selectedHotel = null;
+  var hr = document.getElementById('hotelResults'); if (hr) hr.style.display = 'none';
+  showHotelHint(nearbyHotels.length
+    ? 'Start typing to pick from ' + nearbyHotels.length + ' nearby hotels — or just type the name yourself.'
+    : '');
 }
 
 function showMsg(txt, cls) {
