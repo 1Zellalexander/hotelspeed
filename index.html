@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.2 — upload-weighted speed test: custom measurements ladder (SPEED_MEASUREMENTS) adds extra upload samples + a 100MB upload step for better upload accuracy on fast uplinks. Builds on v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
+<!-- HotelSpeed v2.4 — v2.2 plus a location verified/unverified indicator: each submission records whether device location was granted, and results without it are shown in an alternate colour (amber row + "unverified" badge in the table, dashed amber pin on the map). No 3-run flow or hard gate (those were the reverted v2.3). Builds on v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -97,6 +97,7 @@
     .slow { background: #fee2e2; color: #991b1b; }
     .wired    { background: #e0f2fe; color: #0369a1; }
     .wireless { background: #f3e8ff; color: #7e22ce; }
+    .badge.unverified { background: #fef3c7; color: #92400e; }
 
     /* ── Filters ── */
     .filters { display: flex; gap: 12px; margin: 20px 0 12px; flex-wrap: wrap; align-items: center; }
@@ -124,6 +125,7 @@
     td { padding: 14px 20px; border-bottom: 1px solid var(--border); vertical-align: middle; }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: var(--bg); }
+    tr.unverified td { background: #fff8ec; }
     .h-name { font-weight: 600; }
     .h-loc { font-size: 12px; color: var(--muted); margin-top: 2px; }
     .empty { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 15px; }
@@ -456,14 +458,17 @@ function speedColor(mbps) { return mbps >= 50 ? '#34c759' : mbps >= 10 ? '#ff9f0
 function addMarker(row) {
   if (!map || !markersLayer || !row.lat || !row.lon) return;
   try {
+    var unv = (row.location_verified === false);
     var color = speedColor(row.download_mbps);
+    var border = unv ? '2.5px dashed #b08900' : '2.5px solid #fff';
     var icon = L.divIcon({
       className: '',
-      html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
+      html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:' + border + ';box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
       iconSize: [13,13], iconAnchor: [6,6]
     });
     var html = '<div class="p-name">' + row.hotel_name + '</div>' +
       '<div class="p-row"><span>' + row.city + ', ' + row.country + '</span></div>' +
+      (unv ? '<div class="p-row" style="color:#92400e">&#9888; Location unverified</div>' : '') +
       '<div style="margin:8px 0 6px;display:flex;gap:6px">' +
         '<span class="badge ' + speedClass(row.download_mbps) + '">' + speedLabel(row.download_mbps) + '</span>' +
         '<span class="badge ' + row.connection_type + '">' + (row.connection_type === 'wired' ? 'Wired' : 'Wireless') + '</span>' +
@@ -547,8 +552,10 @@ function renderTable() {
   tbody.innerHTML = rows.map(function(r) {
     var d = new Date(r.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
     var dist = distCity && r.lat ? ' <span style="font-size:12px;color:var(--muted)">(' + Math.round(haversine(distCity.lat,distCity.lon,r.lat,r.lon)) + ' km)</span>' : '';
-    return '<tr>' +
-      '<td><div class="h-name">' + r.hotel_name + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
+    var unv = (r.location_verified === false);
+    var unvBadge = unv ? ' <span class="badge unverified" title="Submitted without location permission">unverified</span>' : '';
+    return '<tr' + (unv ? ' class="unverified"' : '') + '>' +
+      '<td><div class="h-name">' + r.hotel_name + unvBadge + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
       '<td><span class="badge ' + speedClass(r.download_mbps) + '">' + r.download_mbps + ' Mbps</span></td>' +
       '<td>' + r.upload_mbps + ' Mbps</td>' +
       '<td>' + r.ping_ms + ' ms</td>' +
@@ -1124,6 +1131,7 @@ document.getElementById('form').addEventListener('submit', async function(e) {
     city: city, country: country, connection_type: conn,
     download_mbps: dl, upload_mbps: ul, ping_ms: png,
     room_floor: document.getElementById('fRoom').value.trim() || null,
+    location_verified: !!userGeo,
     lat: pinLat, lon: pinLon
   };
 
