@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- HotelSpeed v1.7 — speed test rewritten: duration-based, multi-stream download/upload + idle-latency ping -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -546,115 +547,259 @@ document.getElementById('distBtn').addEventListener('click', async function() {
 });
 
 // =====================================================
-// SPEED TEST
+// SPEED TEST  (v1.7 — duration-based, multi-stream)
 // =====================================================
-function timedFetch(url, opts, ms) {
-  var ctrl = new AbortController();
-  var t = setTimeout(function(){ ctrl.abort(); }, ms);
-  return fetch(url, Object.assign({}, opts, { signal: ctrl.signal }))
-    .finally(function(){ clearTimeout(t); });
+// Why this is more accurate than the old fixed-size test:
+//  • Download & upload run for a fixed DURATION, not a fixed file
+//    size, so the test always lasts long enough to feel real and to
+//    let the connection settle.
+//  • We ignore the first ~1.5-2 s ("TCP slow-start" ramp-up) and
+//    measure only the steady-state window — that is the true line speed.
+//  • Several parallel streams are used so fast links get fully saturated.
+//  • Ping uses the browser's high-resolution Resource-Timing TTFB
+//    (request-sent -> first-byte) and reports the low-end *idle* latency,
+//    which is what real speed tests show, instead of a noisy median.
+
+var SPEEDCFG = {
+  ping:     { samples: 15, warmups: 3 },
+  download: { streams: 4, warmupMs: 2000, totalMs: 9000, perReq: 104857600 }, // 100 MB / request
+  upload:   { streams: 3, warmupMs: 1500, totalMs: 7000, chunk: 8388608 }     // 8 MB / chunk
+};
+
+function fmt(n){ return Math.round(n * 10) / 10; }
+function setStatus(t){ document.getElementById('testStatus').textContent = t; }
+
+// ---- helpers ---------------------------------------------------------
+async function fetchConsume(url) {
+  var res = await fetch(url, { cache: 'no-store' });
+  await res.arrayBuffer();                 // drain the (tiny) body
+  return res;
 }
 
-// Get TTFB from PerformanceResourceTiming API (most accurate browser ping)
-// Falls back to manual timing if browser blocks cross-origin timing
-function getTTFB(url) {
-  var entries = performance.getEntriesByType('resource');
-  for (var i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].name.indexOf(url) === 0 && entries[i].responseStart > 0) {
-      return Math.round(entries[i].responseStart - entries[i].requestStart);
+// Find a request's TTFB (request-sent -> first-byte) in the Resource
+// Timing buffer by a unique token we put in its URL. Cloudflare sends a
+// Timing-Allow-Origin header, so these cross-origin timings are exposed.
+function findTTFB(token) {
+  var e = performance.getEntriesByType('resource');
+  for (var i = e.length - 1; i >= 0; i--) {
+    if (e[i].name.indexOf(token) !== -1 && e[i].responseStart > 0 && e[i].requestStart > 0) {
+      return e[i].responseStart - e[i].requestStart;
     }
   }
   return null;
 }
 
+// ---- PING ------------------------------------------------------------
+async function measurePing(cfg) {
+  var base = 'https://speed.cloudflare.com/__down?bytes=1';
+  performance.clearResourceTimings();
+
+  // Warm up the connection (DNS + TCP + TLS + HTTP/2) so setup isn't counted.
+  for (var w = 0; w < cfg.warmups; w++) {
+    try { await fetchConsume(base + '&pw=' + w + '_' + Date.now()); } catch (e) {}
+  }
+
+  var samples = [];
+  for (var i = 0; i < cfg.samples; i++) {
+    setStatus('Measuring ping… ' + (i + 1) + ' / ' + cfg.samples);
+    var tok = 'pg' + i + '_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    var t0 = performance.now();
+    try { await fetchConsume(base + '&' + tok + '=1'); } catch (e) { continue; }
+    var manual = performance.now() - t0;
+    await new Promise(function(r){ setTimeout(r, 0); });   // let the timing entry register
+    var ttfb = findTTFB(tok);
+    var v = (ttfb !== null && ttfb > 0) ? ttfb : manual;
+    if (v > 0 && v < 10000) samples.push(v);
+  }
+  if (!samples.length) return { ping: null, jitter: null };
+
+  samples.sort(function(a, b){ return a - b; });
+  // idle latency = average of the fastest ~third of the samples
+  var keep = Math.min(samples.length, Math.max(3, Math.round(samples.length * 0.3)));
+  var low  = samples.slice(0, keep);
+  var ping = low.reduce(function(s, v){ return s + v; }, 0) / low.length;
+  // jitter = mean absolute deviation across all samples
+  var mean   = samples.reduce(function(s, v){ return s + v; }, 0) / samples.length;
+  var jitter = samples.reduce(function(s, v){ return s + Math.abs(v - mean); }, 0) / samples.length;
+  return { ping: Math.round(ping), jitter: Math.round(jitter) };
+}
+
+// ---- DOWNLOAD (streamed, multi-connection, windowed) -----------------
+async function measureDownload(cfg, onUpdate) {
+  var t0 = performance.now();
+  var winBytes = 0, winStart = 0, done = false;
+  var ctrl = new AbortController();
+  function elapsed(){ return performance.now() - t0; }
+
+  function worker() {
+    return (async function () {
+      while (!done) {
+        var url = 'https://speed.cloudflare.com/__down?bytes=' + cfg.perReq +
+                  '&t=' + Date.now() + '_' + Math.random();
+        try {
+          var res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+          if (!res.body || !res.body.getReader) {        // very old browser fallback
+            var buf = await res.arrayBuffer();
+            if (elapsed() >= cfg.warmupMs) { if (!winStart) winStart = performance.now(); winBytes += buf.byteLength; }
+          } else {
+            var reader = res.body.getReader();
+            while (true) {
+              var r = await reader.read();
+              if (r.done) break;
+              var len = r.value.length;
+              var e = elapsed();
+              if (e >= cfg.warmupMs) { if (!winStart) winStart = performance.now(); winBytes += len; }
+              if (e >= cfg.totalMs) { done = true; try { ctrl.abort(); } catch (_) {} break; }
+            }
+          }
+        } catch (err) { if (done) break; }   // AbortError on finish is expected
+        if (elapsed() >= cfg.totalMs) { done = true; break; }
+      }
+    })();
+  }
+
+  var ui = setInterval(function () {
+    var secs = winStart ? (performance.now() - winStart) / 1000 : 0;
+    var mbps = secs > 0 ? (winBytes * 8) / secs / 1e6 : 0;
+    onUpdate(mbps, Math.min(99, elapsed() / cfg.totalMs * 100));
+  }, 200);
+
+  var workers = [];
+  for (var i = 0; i < cfg.streams; i++) workers.push(worker());
+  await Promise.all(workers);
+  clearInterval(ui);
+
+  var secs = winStart ? (performance.now() - winStart) / 1000 : 0;
+  return secs > 0 ? (winBytes * 8) / secs / 1e6 : 0;
+}
+
+// ---- UPLOAD (XHR upload-progress, multi-connection, windowed) --------
+function makeBlob(n) {
+  var a = new Uint8Array(n);
+  for (var i = 0; i < n; i += 4096) a[i] = (Math.random() * 256) | 0;   // sprinkle entropy to defeat compression
+  return new Blob([a]);
+}
+
+function measureUpload(cfg, onUpdate) {
+  return new Promise(function (resolve) {
+    var t0 = performance.now();
+    var winBytes = 0, winStart = 0, totalLoaded = 0, errors = 0, done = false;
+    var xhrs = [], blob = makeBlob(cfg.chunk);
+    function elapsed(){ return performance.now() - t0; }
+
+    function finish() {
+      if (done) return;
+      done = true;
+      clearInterval(ui);
+      xhrs.forEach(function (x) { try { x.abort(); } catch (_) {} });
+      var secs = winStart ? (performance.now() - winStart) / 1000 : 0;
+      var mbps = (winStart && secs > 0) ? (winBytes * 8) / secs / 1e6 : 0;
+      resolve({ mbps: mbps, ok: totalLoaded > 0 });
+    }
+
+    function onBytes(d) {
+      totalLoaded += d;
+      var e = elapsed();
+      if (e >= cfg.warmupMs) { if (!winStart) winStart = performance.now(); winBytes += d; }
+      if (e >= cfg.totalMs) finish();
+    }
+
+    function bail() {                       // upload appears blocked / failing
+      errors++;
+      if (errors > cfg.streams * 4 && totalLoaded === 0) finish();
+      else if (!done) spawn();
+    }
+
+    function spawn() {
+      if (done) return;
+      if (elapsed() >= cfg.totalMs) { finish(); return; }
+      var xhr = new XMLHttpRequest();
+      var last = 0;
+      xhr.upload.onprogress = function (ev) { var d = ev.loaded - last; last = ev.loaded; if (d > 0) onBytes(d); };
+      xhr.upload.onload  = function () { if (!done) spawn(); };   // chunk fully sent -> send another
+      xhr.upload.onerror = bail;
+      xhr.onerror        = bail;
+      try {
+        xhr.open('POST', 'https://speed.cloudflare.com/__up?t=' + Date.now() + '_' + Math.random());
+        xhr.send(blob);
+        xhrs.push(xhr);
+      } catch (e) { bail(); }
+    }
+
+    var ui = setInterval(function () {
+      var secs = winStart ? (performance.now() - winStart) / 1000 : 0;
+      var mbps = secs > 0 ? (winBytes * 8) / secs / 1e6 : 0;
+      onUpdate(mbps, Math.min(99, elapsed() / cfg.totalMs * 100));
+    }, 200);
+
+    setTimeout(function () { finish(); }, cfg.totalMs + 5000);   // hard safety stop
+    for (var i = 0; i < cfg.streams; i++) spawn();
+  });
+}
+
+// ---- ORCHESTRATION ---------------------------------------------------
 async function runSpeedTest() {
-  var btn    = document.getElementById('runBtn');
-  var status = document.getElementById('testStatus');
-  btn.disabled = true;
-  btn.textContent = 'Testing…';
+  var btn = document.getElementById('runBtn');
+  if (btn.dataset.running === '1') return;            // ignore double-clicks / re-entry
+  btn.dataset.running = '1';
+  btn.disabled = true; btn.textContent = 'Testing…';
 
-  var ping = null, dl = null, ul = null;
-  var BASE = 'https://speed.cloudflare.com/__down?bytes=1';
+  var dlEl = document.getElementById('dlVal');
+  var ulEl = document.getElementById('ulVal');
+  var pgEl = document.getElementById('pingVal');
+  dlEl.textContent = '—'; ulEl.textContent = '—'; pgEl.textContent = '—';
 
-  // ── PING ──────────────────────────────────────────
-  // Strategy: 2 warmup requests, then 8 measured samples.
-  // Use PerformanceTiming TTFB where available (most accurate),
-  // fall back to manual timer. Take median of middle 4 to kill outliers.
+  var dl = null, ul = null, ping = null;
+
+  // PING
   try {
-    status.textContent = 'Warming up connection…';
-    performance.clearResourceTimings();
-    // Two warmups to fully settle TCP + TLS + HTTP/2 stream
-    await timedFetch(BASE + '&w=1&t=' + Date.now(), { cache:'no-store' }, 8000);
-    await timedFetch(BASE + '&w=2&t=' + Date.now(), { cache:'no-store' }, 8000);
-
-    status.textContent = 'Measuring ping (8 samples)…';
-    var pingSamples = [];
-    for (var pi = 0; pi < 8; pi++) {
-      performance.clearResourceTimings();
-      var pingUrl = BASE + '&pi=' + pi + '&t=' + Date.now();
-      var pt0 = performance.now();
-      await timedFetch(pingUrl, { cache:'no-store' }, 8000);
-      var manualMs = Math.round(performance.now() - pt0);
-      // Prefer TTFB from PerformanceTiming (strips out JS overhead)
-      var ttfb = getTTFB('https://speed.cloudflare.com/__down');
-      pingSamples.push(ttfb !== null ? ttfb : manualMs);
+    setStatus('Warming up connection…');
+    var p = await measurePing(SPEEDCFG.ping);
+    ping = p.ping;
+    if (ping !== null) {
+      pgEl.textContent = ping;
+      document.getElementById('fPing').value = ping;
+      setStatus('Ping ' + ping + ' ms' + (p.jitter !== null ? '  (±' + p.jitter + ' ms jitter)' : ''));
     }
-    // Sort, discard top 2 and bottom 2, take median of remaining 4
-    pingSamples.sort(function(a, b){ return a - b; });
-    var trimmed = pingSamples.slice(2, 6);
-    ping = Math.round(trimmed.reduce(function(s,v){ return s+v; }, 0) / trimmed.length);
-    document.getElementById('pingVal').textContent = ping;
-    document.getElementById('fPing').value = ping;
-  } catch(e) {
-    status.textContent = 'Ping failed — check your connection and try again.';
-    btn.disabled = false; btn.textContent = 'Try Again'; return;
-  }
+  } catch (e) { setStatus('Ping could not be measured — continuing…'); }
 
-  // ── DOWNLOAD ──────────────────────────────────────
-  // Two 25 MB runs, averaged for accuracy
+  // DOWNLOAD
   try {
-    var dlRuns = [];
-    for (var di = 0; di < 2; di++) {
-      status.textContent = 'Measuring download… (run ' + (di+1) + ' of 2)';
-      var dt0 = performance.now();
-      var dres = await timedFetch('https://speed.cloudflare.com/__down?bytes=25000000&t=' + Date.now(), { cache:'no-store' }, 45000);
-      await dres.arrayBuffer();
-      var dsecs = (performance.now() - dt0) / 1000;
-      dlRuns.push((25 * 8) / dsecs);
-    }
-    dl = Math.round((dlRuns[0] + dlRuns[1]) / 2 * 10) / 10;
-    document.getElementById('dlVal').textContent = dl;
+    var dlMbps = await measureDownload(SPEEDCFG.download, function (mbps, pct) {
+      dlEl.textContent = fmt(mbps);
+      setStatus('Measuring download… ' + Math.round(pct) + '%   (' + fmt(mbps) + ' Mbps)');
+    });
+    dl = fmt(dlMbps);
+    dlEl.textContent = dl;
     document.getElementById('fDl').value = dl;
-  } catch(e) {
-    dl = 0;
-    status.textContent = 'Download test failed — enter your speed manually.';
+  } catch (e) {
+    dl = 0; setStatus('Download test failed — you can enter your speed manually.');
   }
 
-  // ── UPLOAD ────────────────────────────────────────
-  // Two 5 MB runs, averaged
+  // UPLOAD
   try {
-    status.textContent = 'Measuring upload… (run 1 of 2)';
-    var ulRuns = [];
-    for (var ui = 0; ui < 2; ui++) {
-      if (ui === 1) status.textContent = 'Measuring upload… (run 2 of 2)';
-      var payload = new Uint8Array(5000000);
-      var ut0 = performance.now();
-      await timedFetch('https://speed.cloudflare.com/__up', { method:'POST', body:payload, cache:'no-store' }, 20000);
-      var usecs = (performance.now() - ut0) / 1000;
-      ulRuns.push((5 * 8) / usecs);
+    var up = await measureUpload(SPEEDCFG.upload, function (mbps, pct) {
+      ulEl.textContent = fmt(mbps);
+      setStatus('Measuring upload… ' + Math.round(pct) + '%   (' + fmt(mbps) + ' Mbps)');
+    });
+    if (up.ok && up.mbps > 0) {
+      ul = fmt(up.mbps);
+      ulEl.textContent = ul;
+      document.getElementById('fUl').value = ul;
+      setStatus('Test complete!  ↓ ' + dl + ' · ↑ ' + ul +
+                ' · ping ' + (ping !== null ? ping + ' ms' : '—') +
+                '. Fill in your hotel details below.');
+    } else {
+      throw new Error('upload blocked');
     }
-    ul = Math.round((ulRuns[0] + ulRuns[1]) / 2 * 10) / 10;
-    document.getElementById('ulVal').textContent = ul;
-    document.getElementById('fUl').value = ul;
-    status.textContent = 'Test complete! Fill in your hotel details below.';
-  } catch(e) {
-    ul = dl ? Math.round(dl * 0.4 * 10) / 10 : null;
-    if (ul) { document.getElementById('ulVal').textContent = ul + '*'; document.getElementById('fUl').value = ul; }
-    status.textContent = 'Done! Upload estimated* — correct it manually if needed.';
+  } catch (e) {
+    ul = dl ? fmt(dl * 0.4) : null;
+    if (ul) { ulEl.textContent = ul + '*'; document.getElementById('fUl').value = ul; }
+    setStatus('Done! Upload was blocked by the network, so it is estimated* — correct it manually if you can.');
   }
 
-  btn.disabled = false;
-  btn.textContent = 'Run Again';
+  btn.disabled = false; btn.textContent = 'Run Again';
+  btn.dataset.running = '';
 }
 
 document.getElementById('runBtn').addEventListener('click', runSpeedTest);
