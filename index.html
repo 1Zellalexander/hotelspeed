@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v1.8 — speed test now uses the official @cloudflare/speedtest engine, with the v1.7 built-in test as an automatic fallback -->
+<!-- HotelSpeed v1.9 — adds optional device geolocation: auto-fills city/country, warns on large city mismatches (non-blocking), and uses precise coords for the map pin. Built on v1.8 (Cloudflare speed-test engine + built-in fallback). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -337,6 +337,7 @@
           <input type="text" id="fRoom" placeholder="e.g. Floor 12" />
         </div>
       </div>
+      <div id="geoNote" class="hint" style="display:none;margin-top:12px">&nbsp;</div>
       <button type="submit" class="sub-btn" id="subBtn">Submit My Result</button>
       <div class="msg" id="formMsg"></div>
     </form>
@@ -554,6 +555,60 @@ async function geocode(q) {
     var d = await res.json();
     return d.length ? { lat: parseFloat(d[0].lat), lon: parseFloat(d[0].lon) } : null;
   } catch(e) { return null; }
+}
+
+// =====================================================
+// DEVICE LOCATION (optional) — verify city + place pin
+// =====================================================
+// Uses the browser Geolocation API (needs HTTPS + user permission).
+// It is NOT fooled by VPNs the way IP lookup is. Everything here is
+// optional: if the user denies the prompt, the site behaves as before.
+var userGeo = null;                 // { lat, lon, acc } once granted
+var geoAsked = false;               // only ever prompt once per page load
+var LOCATION_WARN_KM = 200;         // warn if the typed city is farther than this
+
+function setGeoNote(txt) {
+  var el = document.getElementById('geoNote');
+  if (!el) return;
+  el.textContent = txt || '';
+  el.style.display = txt ? 'block' : 'none';
+}
+
+function captureLocation() {
+  if (geoAsked || !navigator.geolocation) return;
+  geoAsked = true;
+  navigator.geolocation.getCurrentPosition(
+    function (pos) {
+      userGeo = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
+      setGeoNote('Using your device location to check the city and place the map pin accurately.');
+      autofillFromGeo();
+    },
+    function (err) {
+      // Denied / unavailable / timed out — stay silent (warn-don't-block).
+      console.info('Location not available:', err && err.message);
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
+  );
+}
+
+async function autofillFromGeo() {
+  if (!userGeo) return;
+  try {
+    var r = await fetch('https://nominatim.openstreetmap.org/reverse?lat=' + userGeo.lat +
+                        '&lon=' + userGeo.lon + '&format=json&zoom=10',
+                        { headers: { 'Accept-Language': 'en' } });
+    var d = await r.json();
+    var a = (d && d.address) ? d.address : null;
+    if (!a) return;
+    var city    = a.city || a.town || a.village || a.municipality || a.county || '';
+    var country = a.country || '';
+    var cityEl    = document.getElementById('fCity');
+    var countryEl = document.getElementById('fCountry');
+    var filled = false;
+    if (city && !cityEl.value.trim())       { cityEl.value = city; filled = true; }
+    if (country && !countryEl.value.trim()) { countryEl.value = country; filled = true; }
+    if (filled) setGeoNote('We filled in your city and country from your location — please double-check and edit if needed.');
+  } catch (e) {}
 }
 
 document.getElementById('distBtn').addEventListener('click', async function() {
@@ -911,6 +966,7 @@ async function runSpeedTest() {
   btn.dataset.running = '1';
   btn.disabled = true; btn.textContent = 'Testing…';
   resetReadings();
+  captureLocation();   // ask once for location (used to verify the city + place the pin)
 
   try {
     setStatus('Loading speed-test engine…');
@@ -958,15 +1014,38 @@ document.getElementById('form').addEventListener('submit', async function(e) {
   var btn     = document.getElementById('subBtn');
   btn.disabled = true; btn.textContent = 'Submitting…';
 
-  var coords = await geocode(city + ', ' + country);
-  var conn   = document.querySelector('input[name=conn]:checked').value;
+  // Geocode the typed city -> coordinates for the map pin.
+  var cityCoords = await geocode(city + ', ' + country);
+  var pinLat = cityCoords ? cityCoords.lat : null;
+  var pinLon = cityCoords ? cityCoords.lon : null;
+
+  // Location sanity check (warn, never block). If the device's real
+  // position is far from the city they typed, ask before submitting.
+  if (userGeo && cityCoords) {
+    var distKm = haversine(userGeo.lat, userGeo.lon, cityCoords.lat, cityCoords.lon);
+    if (distKm > LOCATION_WARN_KM) {
+      var proceed = confirm(
+        'Heads up: your device looks like it is about ' + Math.round(distKm) +
+        ' km from "' + city + ', ' + country + '".\n\n' +
+        'That usually means the city or country was mistyped. Submit anyway?'
+      );
+      if (!proceed) { btn.disabled = false; btn.textContent = 'Submit My Result'; return; }
+      // They chose to proceed -> keep the city they typed as the pin location.
+    } else {
+      // Device agrees with the typed city -> use the precise device
+      // coordinates so the pin lands on the actual hotel, not the city centre.
+      pinLat = userGeo.lat; pinLon = userGeo.lon;
+    }
+  }
+
+  var conn = document.querySelector('input[name=conn]:checked').value;
 
   var rec = {
     hotel_name: document.getElementById('fName').value.trim(),
     city: city, country: country, connection_type: conn,
     download_mbps: dl, upload_mbps: ul, ping_ms: png,
     room_floor: document.getElementById('fRoom').value.trim() || null,
-    lat: coords ? coords.lat : null, lon: coords ? coords.lon : null
+    lat: pinLat, lon: pinLon
   };
 
   if (DEMO) {
@@ -987,10 +1066,15 @@ document.getElementById('form').addEventListener('submit', async function(e) {
   btn.disabled = false; btn.textContent = 'Submit My Result';
 });
 
+// Also ask for location as soon as the user engages the form (one prompt only).
+document.getElementById('fName').addEventListener('focus', captureLocation);
+document.getElementById('fCity').addEventListener('focus', captureLocation);
+
 function resetForm() {
   document.getElementById('form').reset();
   ['dlVal','ulVal','pingVal'].forEach(function(id){ document.getElementById(id).textContent = '—'; });
   document.getElementById('testStatus').textContent = 'Click the button to measure your connection speed.';
+  setGeoNote('');
 }
 
 function showMsg(txt, cls) {
