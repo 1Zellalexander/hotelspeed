@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v1.7 — speed test rewritten: duration-based, multi-stream download/upload + idle-latency ping -->
+<!-- HotelSpeed v1.8 — speed test now uses the official @cloudflare/speedtest engine, with the v1.7 built-in test as an automatic fallback -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -293,6 +293,7 @@
         <div class="speed-num"><div class="val" id="pingVal">—</div><div class="unit">ms</div><div class="lbl">Ping</div></div>
       </div>
       <div id="testStatus">Click the button to measure your connection speed.</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:10px">Powered by Cloudflare&rsquo;s global network &middot; results may be collected by Cloudflare</div>
     </div>
 
     <form id="form">
@@ -347,6 +348,25 @@
 <!-- Scripts load after body so DOM is always ready -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<!-- Official Cloudflare speed-test engine (open source), loaded as an ES module from CDN.
+     It is assigned to window.CFSpeedTest. If it fails to load (e.g. a blocked or offline
+     network), the main script automatically falls back to the built-in v1.7 test. -->
+<script type="module">
+  (async function () {
+    try {
+      var mod = await import('https://esm.sh/@cloudflare/speedtest@1.5.0');
+      window.CFSpeedTest = (mod && (mod.default || mod.SpeedTest)) || null;
+    } catch (e) {
+      console.warn('Cloudflare speedtest engine failed to load; using built-in test.', e);
+      window.CFSpeedTest = null;
+    } finally {
+      window.CF_LOADED = true;
+      try { window.dispatchEvent(new Event('cf-engine-state')); } catch (e) {}
+    }
+  })();
+</script>
+
 <script>
 // =====================================================
 // CONFIG — paste your Supabase details here
@@ -737,17 +757,13 @@ function measureUpload(cfg, onUpdate) {
   });
 }
 
-// ---- ORCHESTRATION ---------------------------------------------------
-async function runSpeedTest() {
-  var btn = document.getElementById('runBtn');
-  if (btn.dataset.running === '1') return;            // ignore double-clicks / re-entry
-  btn.dataset.running = '1';
-  btn.disabled = true; btn.textContent = 'Testing…';
-
+// ---- BUILT-IN (FALLBACK) TEST --------------------------------------
+// The v1.7 hand-rolled test. Used only if the Cloudflare engine can't
+// load. Button state is managed by runSpeedTest(), not in here.
+async function runManualSpeedTest() {
   var dlEl = document.getElementById('dlVal');
   var ulEl = document.getElementById('ulVal');
   var pgEl = document.getElementById('pingVal');
-  dlEl.textContent = '—'; ulEl.textContent = '—'; pgEl.textContent = '—';
 
   var dl = null, ul = null, ping = null;
 
@@ -796,6 +812,120 @@ async function runSpeedTest() {
     ul = dl ? fmt(dl * 0.4) : null;
     if (ul) { ulEl.textContent = ul + '*'; document.getElementById('fUl').value = ul; }
     setStatus('Done! Upload was blocked by the network, so it is estimated* — correct it manually if you can.');
+  }
+
+}
+
+// ---- CLOUDFLARE ENGINE: readiness helper ---------------------------
+// Resolves with the SpeedTest class once the ES module has loaded, or
+// null after a timeout, so the caller can fall back to the built-in test.
+function cfEngineReady(timeoutMs) {
+  return new Promise(function (resolve) {
+    if (window.CF_LOADED) return resolve(window.CFSpeedTest || null);
+    var settled = false;
+    function done(v) {
+      if (settled) return; settled = true;
+      window.removeEventListener('cf-engine-state', onState);
+      clearTimeout(to);
+      resolve(v);
+    }
+    function onState() { done(window.CFSpeedTest || null); }
+    window.addEventListener('cf-engine-state', onState);
+    var to = setTimeout(function () { done(window.CFSpeedTest || null); }, timeoutMs);
+  });
+}
+
+// ---- CLOUDFLARE TEST: run engine, map results into UI + form -------
+function runCloudflareTest(Engine) {
+  return new Promise(function (resolve, reject) {
+    function valid(x) { return x != null && x > 0; }
+    var dlEl = document.getElementById('dlVal');
+    var ulEl = document.getElementById('ulVal');
+    var pgEl = document.getElementById('pingVal');
+    var settled = false, engine;
+
+    function finish(ok, err) {
+      if (settled) return; settled = true;
+      try { engine && engine.pause && engine.pause(); } catch (e) {}
+      ok ? resolve() : reject(err || new Error('cf test failed'));
+    }
+
+    try { engine = new Engine({ autoStart: false }); }
+    catch (e) { return reject(e); }
+
+    // Live partial readings as each measurement completes (bps -> Mbps).
+    engine.onResultsChange = function () {
+      try {
+        var s = engine.results.getSummary();
+        if (valid(s.download)) dlEl.textContent = fmt(s.download / 1e6);
+        if (valid(s.upload))   ulEl.textContent = fmt(s.upload / 1e6);
+        if (s.latency != null) pgEl.textContent = Math.round(s.latency);
+        var parts = [];
+        if (s.latency != null)  parts.push('ping ' + Math.round(s.latency) + ' ms');
+        if (valid(s.download))  parts.push('↓ ' + fmt(s.download / 1e6));
+        if (valid(s.upload))    parts.push('↑ ' + fmt(s.upload / 1e6));
+        setStatus('Testing with Cloudflare… ' + parts.join(' · '));
+      } catch (e) {}
+    };
+
+    engine.onFinish = function (results) {
+      try {
+        var s = results.getSummary();
+        var dl   = valid(s.download) ? fmt(s.download / 1e6) : null;
+        var ul   = valid(s.upload)   ? fmt(s.upload / 1e6)   : null;
+        var ping = (s.latency != null && s.latency >= 0) ? Math.round(s.latency) : null;
+
+        if (dl == null && ul == null) { finish(false, new Error('no usable results')); return; }
+
+        if (dl   != null) { dlEl.textContent = dl;   document.getElementById('fDl').value = dl; }
+        if (ping != null) { pgEl.textContent = ping; document.getElementById('fPing').value = ping; }
+        if (ul != null) {
+          ulEl.textContent = ul; document.getElementById('fUl').value = ul;
+        } else if (dl != null) {                       // upload missing -> estimate so the form still works
+          ul = fmt(dl * 0.4);
+          ulEl.textContent = ul + '*'; document.getElementById('fUl').value = ul;
+        }
+
+        var jit = (s.jitter != null) ? '  (±' + Math.round(s.jitter) + ' ms jitter)' : '';
+        setStatus('Test complete!  ↓ ' + (dl != null ? dl : '—') + ' · ↑ ' + (ul != null ? ul : '—') +
+                  ' · ping ' + (ping != null ? ping + ' ms' : '—') + jit + '. Fill in your hotel details below.');
+        finish(true);
+      } catch (e) { finish(false, e); }
+    };
+
+    engine.onError = function (err) { finish(false, err); };
+
+    setStatus('Starting Cloudflare speed test…');
+    try { engine.play(); } catch (e) { finish(false, e); }
+  });
+}
+
+function resetReadings() {
+  ['dlVal', 'ulVal', 'pingVal'].forEach(function (id) { document.getElementById(id).textContent = '—'; });
+}
+
+// ---- ORCHESTRATION: Cloudflare first, built-in fallback -----------
+async function runSpeedTest() {
+  var btn = document.getElementById('runBtn');
+  if (btn.dataset.running === '1') return;            // ignore double-clicks / re-entry
+  btn.dataset.running = '1';
+  btn.disabled = true; btn.textContent = 'Testing…';
+  resetReadings();
+
+  try {
+    setStatus('Loading speed-test engine…');
+    var Engine = await cfEngineReady(6000);
+    if (Engine) {
+      await runCloudflareTest(Engine);
+    } else {
+      setStatus('Cloudflare engine unavailable — using built-in test…');
+      await runManualSpeedTest();
+    }
+  } catch (e) {
+    console.warn('Cloudflare test failed; using built-in fallback.', e);
+    setStatus('Cloudflare test unavailable — switching to the built-in test…');
+    resetReadings();
+    try { await runManualSpeedTest(); } catch (e2) { console.error(e2); }
   }
 
   btn.disabled = false; btn.textContent = 'Run Again';
