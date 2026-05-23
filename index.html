@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.0 — adds type-to-search for nearby hotels (Overpass/OpenStreetMap) once location is known, with manual typing as fallback. Builds on v1.9 (geolocation) + v1.8 (Cloudflare speed-test engine + built-in fallback). -->
+<!-- HotelSpeed v2.1 — speed-test resilience: engine loads from esm.sh OR jsDelivr; Cloudflare results (download+ping) are kept even if only the upload fails (no needless fallback); calmer upload-estimated wording. Builds on v2.0 (hotel type-to-search) + v1.9 (geolocation) + v1.8 (Cloudflare engine + built-in fallback). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -370,21 +370,27 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
-<!-- Official Cloudflare speed-test engine (open source), loaded as an ES module from CDN.
-     It is assigned to window.CFSpeedTest. If it fails to load (e.g. a blocked or offline
-     network), the main script automatically falls back to the built-in v1.7 test. -->
+<!-- Official Cloudflare speed-test engine (open source), loaded as an ES module from a CDN.
+     Assigned to window.CFSpeedTest. Tries esm.sh first, then jsDelivr, so a single blocked
+     or failing CDN doesn't force the built-in fallback. If neither loads, the main script
+     falls back to the built-in test. -->
 <script type="module">
   (async function () {
-    try {
-      var mod = await import('https://esm.sh/@cloudflare/speedtest@1.5.0');
-      window.CFSpeedTest = (mod && (mod.default || mod.SpeedTest)) || null;
-    } catch (e) {
-      console.warn('Cloudflare speedtest engine failed to load; using built-in test.', e);
-      window.CFSpeedTest = null;
-    } finally {
-      window.CF_LOADED = true;
-      try { window.dispatchEvent(new Event('cf-engine-state')); } catch (e) {}
+    var CDNS = [
+      'https://esm.sh/@cloudflare/speedtest@1.5.0',
+      'https://cdn.jsdelivr.net/npm/@cloudflare/speedtest@1.5.0/+esm'
+    ];
+    for (var i = 0; i < CDNS.length; i++) {
+      try {
+        var mod = await import(CDNS[i]);
+        var T = (mod && (mod.default || mod.SpeedTest)) || null;
+        if (T) { window.CFSpeedTest = T; break; }
+      } catch (e) {
+        console.warn('Cloudflare engine failed to load from ' + CDNS[i], e);
+      }
     }
+    window.CF_LOADED = true;
+    try { window.dispatchEvent(new Event('cf-engine-state')); } catch (e) {}
   })();
 </script>
 
@@ -889,7 +895,7 @@ async function runManualSpeedTest() {
   } catch (e) {
     ul = dl ? fmt(dl * 0.4) : null;
     if (ul) { ulEl.textContent = ul + '*'; document.getElementById('fUl').value = ul; }
-    setStatus('Done! Upload was blocked by the network, so it is estimated* — correct it manually if you can.');
+    setStatus('Done! Upload couldn’t be measured in this browser, so it’s estimated* — edit it if you know the real number.');
   }
 
 }
@@ -921,11 +927,40 @@ function runCloudflareTest(Engine) {
     var ulEl = document.getElementById('ulVal');
     var pgEl = document.getElementById('pingVal');
     var settled = false, engine;
+    var got = { dl: null, ul: null, ping: null };   // best REAL values seen so far
 
-    function finish(ok, err) {
+    function capture(s) {
+      if (!s) return;
+      if (valid(s.download)) got.dl = fmt(s.download / 1e6);
+      if (valid(s.upload))   got.ul = fmt(s.upload / 1e6);
+      if (s.latency != null && s.latency >= 0) got.ping = Math.round(s.latency);
+    }
+
+    // Resolve with whatever real data we captured. We only reject (and let
+    // the caller fall back to the built-in test) if we couldn't even get a
+    // download. If just the upload is missing, we KEEP the real download +
+    // ping and estimate the upload — no needless full fallback.
+    function finalize(jitter) {
       if (settled) return; settled = true;
       try { engine && engine.pause && engine.pause(); } catch (e) {}
-      ok ? resolve() : reject(err || new Error('cf test failed'));
+      if (got.dl == null) { reject(new Error('cloudflare: no download')); return; }
+
+      dlEl.textContent = got.dl; document.getElementById('fDl').value = got.dl;
+      if (got.ping != null) { pgEl.textContent = got.ping; document.getElementById('fPing').value = got.ping; }
+
+      var estimated = false;
+      if (got.ul == null) { got.ul = fmt(got.dl * 0.4); estimated = true; }
+      ulEl.textContent = got.ul + (estimated ? '*' : '');
+      document.getElementById('fUl').value = got.ul;
+
+      var jit = (jitter != null) ? '  (±' + Math.round(jitter) + ' ms jitter)' : '';
+      var msg = 'Test complete!  ↓ ' + got.dl + ' · ↑ ' + got.ul + (estimated ? '*' : '') +
+                ' · ping ' + (got.ping != null ? got.ping + ' ms' : '—') + jit + '.';
+      msg += estimated
+        ? '  Upload couldn’t be measured in this browser, so it’s estimated — edit it if you know the real number.'
+        : '  Fill in your hotel details below.';
+      setStatus(msg);
+      resolve();
     }
 
     try { engine = new Engine({ autoStart: false }); }
@@ -934,47 +969,30 @@ function runCloudflareTest(Engine) {
     // Live partial readings as each measurement completes (bps -> Mbps).
     engine.onResultsChange = function () {
       try {
-        var s = engine.results.getSummary();
-        if (valid(s.download)) dlEl.textContent = fmt(s.download / 1e6);
-        if (valid(s.upload))   ulEl.textContent = fmt(s.upload / 1e6);
-        if (s.latency != null) pgEl.textContent = Math.round(s.latency);
+        capture(engine.results.getSummary());
+        if (got.dl   != null) dlEl.textContent = got.dl;
+        if (got.ul   != null) ulEl.textContent = got.ul;
+        if (got.ping != null) pgEl.textContent = got.ping;
         var parts = [];
-        if (s.latency != null)  parts.push('ping ' + Math.round(s.latency) + ' ms');
-        if (valid(s.download))  parts.push('↓ ' + fmt(s.download / 1e6));
-        if (valid(s.upload))    parts.push('↑ ' + fmt(s.upload / 1e6));
+        if (got.ping != null) parts.push('ping ' + got.ping + ' ms');
+        if (got.dl   != null) parts.push('↓ ' + got.dl);
+        if (got.ul   != null) parts.push('↑ ' + got.ul);
         setStatus('Testing with Cloudflare… ' + parts.join(' · '));
       } catch (e) {}
     };
 
     engine.onFinish = function (results) {
-      try {
-        var s = results.getSummary();
-        var dl   = valid(s.download) ? fmt(s.download / 1e6) : null;
-        var ul   = valid(s.upload)   ? fmt(s.upload / 1e6)   : null;
-        var ping = (s.latency != null && s.latency >= 0) ? Math.round(s.latency) : null;
-
-        if (dl == null && ul == null) { finish(false, new Error('no usable results')); return; }
-
-        if (dl   != null) { dlEl.textContent = dl;   document.getElementById('fDl').value = dl; }
-        if (ping != null) { pgEl.textContent = ping; document.getElementById('fPing').value = ping; }
-        if (ul != null) {
-          ulEl.textContent = ul; document.getElementById('fUl').value = ul;
-        } else if (dl != null) {                       // upload missing -> estimate so the form still works
-          ul = fmt(dl * 0.4);
-          ulEl.textContent = ul + '*'; document.getElementById('fUl').value = ul;
-        }
-
-        var jit = (s.jitter != null) ? '  (±' + Math.round(s.jitter) + ' ms jitter)' : '';
-        setStatus('Test complete!  ↓ ' + (dl != null ? dl : '—') + ' · ↑ ' + (ul != null ? ul : '—') +
-                  ' · ping ' + (ping != null ? ping + ' ms' : '—') + jit + '. Fill in your hotel details below.');
-        finish(true);
-      } catch (e) { finish(false, e); }
+      var jitter = null;
+      try { var s = results.getSummary(); capture(s); jitter = s.jitter; } catch (e) {}
+      finalize(jitter);
     };
 
-    engine.onError = function (err) { finish(false, err); };
+    // Lenient: an error late in the run (usually the upload step) must NOT
+    // throw away the good download/ping we already captured.
+    engine.onError = function (err) { console.warn('Cloudflare engine error:', err); finalize(null); };
 
     setStatus('Starting Cloudflare speed test…');
-    try { engine.play(); } catch (e) { finish(false, e); }
+    try { engine.play(); } catch (e) { reject(e); }
   });
 }
 
