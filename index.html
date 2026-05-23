@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.1 — speed-test resilience: engine loads from esm.sh OR jsDelivr; Cloudflare results (download+ping) are kept even if only the upload fails (no needless fallback); calmer upload-estimated wording. Builds on v2.0 (hotel type-to-search) + v1.9 (geolocation) + v1.8 (Cloudflare engine + built-in fallback). -->
+<!-- HotelSpeed v2.2 — upload-weighted speed test: custom measurements ladder (SPEED_MEASUREMENTS) adds extra upload samples + a 100MB upload step for better upload accuracy on fast uplinks. Builds on v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -919,6 +919,37 @@ function cfEngineReady(timeoutMs) {
   });
 }
 
+// ---- CLOUDFLARE TEST CONFIG: measurement ladder ------------------
+// This REPLACES the engine's built-in default so we can weight the test
+// toward UPLOAD (the metric this site cares about most).
+//   • type 'download'/'upload': bytes = payload size, count = how many samples
+//   • type 'latency': numPackets   • type 'packetLoss': numPackets + wait
+// The engine runs these in order and stops escalating once it has a stable
+// reading, so slow connections won't actually push the biggest payloads.
+// It's the same default Cloudflare sequence, plus the extra UPLOAD steps at
+// the end (more 50 MB samples + a 100 MB step to saturate fast uplinks).
+// To make upload even heavier, raise the counts or add another upload line.
+var SPEED_MEASUREMENTS = [
+  { type: 'latency',    numPackets: 1 },                          // quick latency probe
+  { type: 'download',   bytes: 1e5, count: 1, bypassMinDuration: true },
+  { type: 'latency',    numPackets: 20 },
+  { type: 'download',   bytes: 1e5, count: 9 },
+  { type: 'download',   bytes: 1e6, count: 8 },
+  { type: 'upload',     bytes: 1e5, count: 8 },
+  { type: 'packetLoss', numPackets: 1e3, responsesWaitTime: 3000 },
+  { type: 'upload',     bytes: 1e6, count: 6 },
+  { type: 'download',   bytes: 1e7, count: 6 },
+  { type: 'upload',     bytes: 1e7, count: 4 },
+  { type: 'download',   bytes: 2.5e7, count: 4 },
+  { type: 'upload',     bytes: 2.5e7, count: 4 },
+  { type: 'download',   bytes: 1e8, count: 3 },
+  { type: 'upload',     bytes: 5e7, count: 4 },                   // (default is 3 — bumped to 4)
+  { type: 'download',   bytes: 2.5e8, count: 2 },
+  // ── EXTRA UPLOAD EMPHASIS (added in v2.2) ──
+  { type: 'upload',     bytes: 5e7, count: 3 },                   // more 50 MB upload samples
+  { type: 'upload',     bytes: 1e8, count: 2 }                    // 100 MB upload to saturate fast uplinks
+];
+
 // ---- CLOUDFLARE TEST: run engine, map results into UI + form -------
 function runCloudflareTest(Engine) {
   return new Promise(function (resolve, reject) {
@@ -963,7 +994,7 @@ function runCloudflareTest(Engine) {
       resolve();
     }
 
-    try { engine = new Engine({ autoStart: false }); }
+    try { engine = new Engine({ autoStart: false, measurements: SPEED_MEASUREMENTS }); }
     catch (e) { return reject(e); }
 
     // Live partial readings as each measurement completes (bps -> Mbps).
