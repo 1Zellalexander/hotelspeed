@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.6 — adds a "manual entry" indicator: results whose hotel was typed by hand (not picked from the nearby OpenStreetMap list) record hotel_verified=false and show a yellow "manual entry" badge, alongside the existing location flag. Row tint + dashed map pin now trigger on EITHER flag. Builds on v2.5 (explicit location button) + v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
+<!-- HotelSpeed v2.7 — each hotel name (rankings table + map popup) is now a link that opens a web search for "Hotel, City, Country" in a new tab, so people can jump to the hotel's site. No new data / no DB change; works for existing rows too. Builds on v2.6 (manual-entry indicator) + v2.5 (location button) + v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -132,6 +132,8 @@
     tr:hover td { background: var(--bg); }
     tr.unverified td { background: #fff8ec; }
     .h-name { font-weight: 600; }
+    .hotel-link { color: var(--accent); text-decoration: none; }
+    .hotel-link:hover { text-decoration: underline; }
     .h-loc { font-size: 12px; color: var(--muted); margin-top: 2px; }
     .empty { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 15px; }
 
@@ -465,6 +467,12 @@ function speedClass(mbps) { return mbps >= 50 ? 'fast' : mbps >= 10 ? 'mid' : 's
 function speedLabel(mbps) { return mbps >= 50 ? 'Fast' : mbps >= 10 ? 'OK' : 'Slow'; }
 function speedColor(mbps) { return mbps >= 50 ? '#34c759' : mbps >= 10 ? '#ff9f0a' : '#ff3b30'; }
 
+// Build a web-search URL for a hotel so its name can link to its site.
+function hotelSearchUrl(r) {
+  var q = [r.hotel_name, r.city, r.country].filter(Boolean).join(', ');
+  return 'https://www.google.com/search?q=' + encodeURIComponent(q);
+}
+
 function addMarker(row) {
   if (!map || !markersLayer || !row.lat || !row.lon) return;
   try {
@@ -478,7 +486,7 @@ function addMarker(row) {
       html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:' + border + ';box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
       iconSize: [13,13], iconAnchor: [6,6]
     });
-    var html = '<div class="p-name">' + row.hotel_name + '</div>' +
+    var html = '<div class="p-name"><a class="hotel-link" href="' + hotelSearchUrl(row) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(row.hotel_name) + '</a></div>' +
       '<div class="p-row"><span>' + row.city + ', ' + row.country + '</span></div>' +
       (locUnv ? '<div class="p-row" style="color:#92400e">&#9888; Location unverified</div>' : '') +
       (hotManual ? '<div class="p-row" style="color:#92400e">&#9888; Hotel entered manually</div>' : '') +
@@ -571,7 +579,7 @@ function renderTable() {
       (locUnv ? ' <span class="badge unverified" title="Location not verified — submitted without location permission">location unverified</span>' : '') +
       (hotManual ? ' <span class="badge manual" title="Hotel name typed by hand — not matched to the map">manual entry</span>' : '');
     return '<tr' + ((locUnv || hotManual) ? ' class="unverified"' : '') + '>' +
-      '<td><div class="h-name">' + r.hotel_name + badges + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
+      '<td><div class="h-name"><a class="hotel-link" href="' + hotelSearchUrl(r) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(r.hotel_name) + '</a>' + badges + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
       '<td><span class="badge ' + speedClass(r.download_mbps) + '">' + r.download_mbps + ' Mbps</span></td>' +
       '<td>' + r.upload_mbps + ' Mbps</td>' +
       '<td>' + r.ping_ms + ' ms</td>' +
