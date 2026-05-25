@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.8 — optional trusted-contributor "verified" code. A submission that includes today's Julian-style daily code (YYDDD, local date — e.g. 26144) is flagged contributor_verified and shown with a green "verified" badge. NON-BLOCKING: blank/wrong code still submits, just unverified. Client-side trust marker (can be hardened in-DB later). Builds on v2.7 (hotel links) + v2.6 (manual-entry) + v2.5 (location button) + v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
+<!-- HotelSpeed v2.9 — (1) "Hotels Rated" now counts UNIQUE hotels (name+city), not raw submissions. (2) Avg Download + Wireless Tests exclude archived entries. (3) Archived/legacy rows (archived=true) render as 30+/30+/N/A with green "verified" + slate "archived" badges, mixed into the sorted list. Pairs with a one-time importer for ~94 archived hotels. Builds on v2.8 (contributor code) + v2.7 (hotel links) + v2.6 (manual-entry) + v2.5 (location button) + v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -99,6 +99,7 @@
     .wireless { background: #f3e8ff; color: #7e22ce; }
     .badge.unverified, .badge.manual { background: #fef3c7; color: #92400e; }
     .badge.verified { background: #d1fae5; color: #065f46; }
+    .badge.archived { background: #e2e8f0; color: #475569; }
     .loc-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; }
     #locBtn { padding: 10px 18px; font-size: 14px; white-space: nowrap; }
     .loc-stat { font-size: 13px; color: var(--muted); flex: 1; min-width: 200px; line-height: 1.45; }
@@ -503,18 +504,23 @@ function addMarker(row) {
       html: '<div style="width:13px;height:13px;border-radius:50%;background:' + color + ';border:' + border + ';box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>',
       iconSize: [13,13], iconAnchor: [6,6]
     });
+    var arch = (row.archived === true);
+    var dlS = arch ? '30+ Mbps' : (row.download_mbps + ' Mbps');
+    var ulS = arch ? '30+ Mbps' : (row.upload_mbps + ' Mbps');
+    var pgS = arch ? 'N/A' : (row.ping_ms + ' ms');
     var html = '<div class="p-name"><a class="hotel-link" href="' + hotelSearchUrl(row) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(row.hotel_name) + '</a></div>' +
       (row.contributor_verified ? '<div class="p-row" style="color:#065f46">&#10003; Verified contributor</div>' : '') +
+      (arch ? '<div class="p-row" style="color:#475569">&#9632; Archived entry (30+ floor)</div>' : '') +
       '<div class="p-row"><span>' + row.city + ', ' + row.country + '</span></div>' +
       (locUnv ? '<div class="p-row" style="color:#92400e">&#9888; Location unverified</div>' : '') +
       (hotManual ? '<div class="p-row" style="color:#92400e">&#9888; Hotel entered manually</div>' : '') +
       '<div style="margin:8px 0 6px;display:flex;gap:6px">' +
-        '<span class="badge ' + speedClass(row.download_mbps) + '">' + speedLabel(row.download_mbps) + '</span>' +
+        '<span class="badge ' + speedClass(row.download_mbps) + '">' + (arch ? '30+ Mbps' : speedLabel(row.download_mbps)) + '</span>' +
         '<span class="badge ' + row.connection_type + '">' + (row.connection_type === 'wired' ? 'Wired' : 'Wireless') + '</span>' +
       '</div>' +
-      '<div class="p-row"><span>Download</span><strong>' + row.download_mbps + ' Mbps</strong></div>' +
-      '<div class="p-row"><span>Upload</span><strong>' + row.upload_mbps + ' Mbps</strong></div>' +
-      '<div class="p-row"><span>Ping</span><strong>' + row.ping_ms + ' ms</strong></div>';
+      '<div class="p-row"><span>Download</span><strong>' + dlS + '</strong></div>' +
+      '<div class="p-row"><span>Upload</span><strong>' + ulS + '</strong></div>' +
+      '<div class="p-row"><span>Ping</span><strong>' + pgS + '</strong></div>';
     L.marker([row.lat, row.lon], { icon: icon }).addTo(markersLayer).bindPopup(html);
   } catch(e) {}
 }
@@ -544,10 +550,18 @@ async function loadData() {
 }
 
 function updateStats() {
-  document.getElementById('sHotels').textContent = allData.length;
-  var avg = allData.length ? Math.round(allData.reduce(function(s,r){ return s + r.download_mbps; }, 0) / allData.length) : 0;
+  // Hotels Rated = UNIQUE hotels by name + city (case-insensitive); archived included.
+  var seen = {};
+  allData.forEach(function(r){
+    seen[((r.hotel_name||'').trim().toLowerCase()) + '|' + ((r.city||'').trim().toLowerCase())] = true;
+  });
+  document.getElementById('sHotels').textContent = Object.keys(seen).length;
+
+  // Avg Download + Wireless Tests = REAL tests only (archived 30-floor entries excluded).
+  var real = allData.filter(function(r){ return r.archived !== true; });
+  var avg = real.length ? Math.round(real.reduce(function(s,r){ return s + r.download_mbps; }, 0) / real.length) : 0;
   document.getElementById('sAvg').textContent = avg;
-  document.getElementById('sWireless').textContent = allData.filter(function(r){ return r.connection_type === 'wireless'; }).length;
+  document.getElementById('sWireless').textContent = real.filter(function(r){ return r.connection_type === 'wireless'; }).length;
 }
 
 // =====================================================
@@ -594,15 +608,20 @@ function renderTable() {
     var locUnv = (r.location_verified === false);
     var hotManual = (r.hotel_verified === false);
     var contribOk = (r.contributor_verified === true);
+    var arch = (r.archived === true);
     var badges =
       (contribOk ? ' <span class="badge verified" title="Submitted by a verified contributor (correct daily code)">verified</span>' : '') +
+      (arch ? ' <span class="badge archived" title="Archived / legacy entry — speeds are a 30+ Mbps floor, not a live test">archived</span>' : '') +
       (locUnv ? ' <span class="badge unverified" title="Location not verified — submitted without location permission">location unverified</span>' : '') +
       (hotManual ? ' <span class="badge manual" title="Hotel name typed by hand — not matched to the map">manual entry</span>' : '');
+    var dlCell = arch ? '<span class="badge mid">30+ Mbps</span>' : '<span class="badge ' + speedClass(r.download_mbps) + '">' + r.download_mbps + ' Mbps</span>';
+    var ulCell = arch ? '30+ Mbps' : (r.upload_mbps + ' Mbps');
+    var pingCell = arch ? 'N/A' : (r.ping_ms + ' ms');
     return '<tr' + ((locUnv || hotManual) ? ' class="unverified"' : '') + '>' +
       '<td><div class="h-name"><a class="hotel-link" href="' + hotelSearchUrl(r) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(r.hotel_name) + '</a>' + badges + '</div><div class="h-loc">' + r.city + ', ' + r.country + dist + '</div></td>' +
-      '<td><span class="badge ' + speedClass(r.download_mbps) + '">' + r.download_mbps + ' Mbps</span></td>' +
-      '<td>' + r.upload_mbps + ' Mbps</td>' +
-      '<td>' + r.ping_ms + ' ms</td>' +
+      '<td>' + dlCell + '</td>' +
+      '<td>' + ulCell + '</td>' +
+      '<td>' + pingCell + '</td>' +
       '<td><span class="badge ' + r.connection_type + '">' + (r.connection_type==='wired'?'Wired':'Wireless') + '</span></td>' +
       '<td style="color:var(--muted)">' + d + '</td></tr>';
   }).join('');
