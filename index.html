@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.7 — each hotel name (rankings table + map popup) is now a link that opens a web search for "Hotel, City, Country" in a new tab, so people can jump to the hotel's site. No new data / no DB change; works for existing rows too. Builds on v2.6 (manual-entry indicator) + v2.5 (location button) + v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
+<!-- HotelSpeed v2.8 — optional trusted-contributor "verified" code. A submission that includes today's Julian-style daily code (YYDDD, local date — e.g. 26144) is flagged contributor_verified and shown with a green "verified" badge. NON-BLOCKING: blank/wrong code still submits, just unverified. Client-side trust marker (can be hardened in-DB later). Builds on v2.7 (hotel links) + v2.6 (manual-entry) + v2.5 (location button) + v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -98,6 +98,7 @@
     .wired    { background: #e0f2fe; color: #0369a1; }
     .wireless { background: #f3e8ff; color: #7e22ce; }
     .badge.unverified, .badge.manual { background: #fef3c7; color: #92400e; }
+    .badge.verified { background: #d1fae5; color: #065f46; }
     .loc-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; }
     #locBtn { padding: 10px 18px; font-size: 14px; white-space: nowrap; }
     .loc-stat { font-size: 13px; color: var(--muted); flex: 1; min-width: 200px; line-height: 1.45; }
@@ -370,6 +371,11 @@
           <label>Room / Floor (optional)</label>
           <input type="text" id="fRoom" placeholder="e.g. Floor 12" />
         </div>
+        <div class="fg full">
+          <label>Contributor code (optional)</label>
+          <input type="text" id="fCode" inputmode="numeric" autocomplete="off" placeholder="Team members: enter today's code" />
+          <span class="hint">Adds a "verified" badge to your entry. Leave blank to submit as a normal result.</span>
+        </div>
       </div>
       <div id="geoNote" class="hint" style="display:none;margin-top:12px">&nbsp;</div>
       <button type="submit" class="sub-btn" id="subBtn">Submit My Result</button>
@@ -468,6 +474,17 @@ function speedLabel(mbps) { return mbps >= 50 ? 'Fast' : mbps >= 10 ? 'OK' : 'Sl
 function speedColor(mbps) { return mbps >= 50 ? '#34c759' : mbps >= 10 ? '#ff9f0a' : '#ff3b30'; }
 
 // Build a web-search URL for a hotel so its name can link to its site.
+// Today's Julian-style code (YYDDD) from the *local* date — used to mark
+// trusted-contributor submissions as verified (matches how the team computes it).
+function julianCode() {
+  var d = new Date();
+  var cum = [0,31,59,90,120,151,181,212,243,273,304,334];
+  var y = d.getFullYear();
+  var leap = (y % 4 === 0 && y % 100 !== 0) || (y % 400 === 0);
+  var doy = cum[d.getMonth()] + d.getDate() + ((leap && d.getMonth() > 1) ? 1 : 0);
+  return ('0' + (y % 100)).slice(-2) + ('00' + doy).slice(-3);
+}
+
 function hotelSearchUrl(r) {
   var q = [r.hotel_name, r.city, r.country].filter(Boolean).join(', ');
   return 'https://www.google.com/search?q=' + encodeURIComponent(q);
@@ -487,6 +504,7 @@ function addMarker(row) {
       iconSize: [13,13], iconAnchor: [6,6]
     });
     var html = '<div class="p-name"><a class="hotel-link" href="' + hotelSearchUrl(row) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(row.hotel_name) + '</a></div>' +
+      (row.contributor_verified ? '<div class="p-row" style="color:#065f46">&#10003; Verified contributor</div>' : '') +
       '<div class="p-row"><span>' + row.city + ', ' + row.country + '</span></div>' +
       (locUnv ? '<div class="p-row" style="color:#92400e">&#9888; Location unverified</div>' : '') +
       (hotManual ? '<div class="p-row" style="color:#92400e">&#9888; Hotel entered manually</div>' : '') +
@@ -575,7 +593,9 @@ function renderTable() {
     var dist = distCity && r.lat ? ' <span style="font-size:12px;color:var(--muted)">(' + Math.round(haversine(distCity.lat,distCity.lon,r.lat,r.lon)) + ' km)</span>' : '';
     var locUnv = (r.location_verified === false);
     var hotManual = (r.hotel_verified === false);
+    var contribOk = (r.contributor_verified === true);
     var badges =
+      (contribOk ? ' <span class="badge verified" title="Submitted by a verified contributor (correct daily code)">verified</span>' : '') +
       (locUnv ? ' <span class="badge unverified" title="Location not verified — submitted without location permission">location unverified</span>' : '') +
       (hotManual ? ' <span class="badge manual" title="Hotel name typed by hand — not matched to the map">manual entry</span>' : '');
     return '<tr' + ((locUnv || hotManual) ? ' class="unverified"' : '') + '>' +
@@ -1189,6 +1209,11 @@ document.getElementById('form').addEventListener('submit', async function(e) {
 
   var conn = document.querySelector('input[name=conn]:checked').value;
 
+  // Trusted-contributor check: today's LOCAL Julian code (YYDDD). Non-blocking —
+  // a correct code just marks the entry verified; a blank or wrong code still submits.
+  var contribCode = (document.getElementById('fCode').value || '').trim();
+  var contribVerified = (contribCode !== '' && contribCode === julianCode());
+
   var rec = {
     hotel_name: document.getElementById('fName').value.trim(),
     city: city, country: country, connection_type: conn,
@@ -1196,6 +1221,7 @@ document.getElementById('form').addEventListener('submit', async function(e) {
     room_floor: document.getElementById('fRoom').value.trim() || null,
     location_verified: !!userGeo,
     hotel_verified: !!selectedHotel,
+    contributor_verified: contribVerified,
     lat: pinLat, lon: pinLon
   };
 
