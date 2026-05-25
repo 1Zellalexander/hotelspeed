@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HotelSpeed v2.9 — (1) "Hotels Rated" now counts UNIQUE hotels (name+city), not raw submissions. (2) Avg Download + Wireless Tests exclude archived entries. (3) Archived/legacy rows (archived=true) render as 30+/30+/N/A with green "verified" + slate "archived" badges, mixed into the sorted list. Pairs with a one-time importer for ~94 archived hotels. Builds on v2.8 (contributor code) + v2.7 (hotel links) + v2.6 (manual-entry) + v2.5 (location button) + v2.4 (location indicator) + v2.2 (upload-weighted) + v2.1 (engine resilience) + v2.0 (hotel search) + v1.9 (geolocation). -->
+<!-- HotelSpeed v2.10 — rankings table is now a scrollable panel (max-height ~560px / 70vh) with sticky column headers + a thin custom scrollbar, so a long results list no longer stretches the page. Filters/search/sort stay above the scroll area. CSS-only; no logic changed. Builds on v2.9 (unique counter + archived tier). -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -123,10 +123,14 @@
     }
 
     /* ── Table ── */
-    .tbl-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; box-shadow: var(--shadow); }
+    .tbl-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow-y: auto; overflow-x: hidden; box-shadow: var(--shadow); max-height: min(560px, 70vh); scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+    .tbl-card::-webkit-scrollbar { width: 10px; }
+    .tbl-card::-webkit-scrollbar-track { background: transparent; }
+    .tbl-card::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; border: 2px solid var(--surface); }
+    .tbl-card::-webkit-scrollbar-thumb:hover { background: #b5b5bd; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     thead { background: var(--bg); border-bottom: 1px solid var(--border); }
-    th { padding: 14px 20px; text-align: left; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); cursor: pointer; user-select: none; }
+    th { padding: 14px 20px; text-align: left; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); cursor: pointer; user-select: none; position: sticky; top: 0; z-index: 2; background: var(--bg); box-shadow: inset 0 -1px 0 var(--border); }
     th:hover { color: var(--text); }
     th.sorted { color: var(--accent); }
     td { padding: 14px 20px; border-bottom: 1px solid var(--border); vertical-align: middle; }
